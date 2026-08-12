@@ -6,13 +6,13 @@
 
 ### 35-second tour
 
-[![Watch the 35-second C-Space tour (click to play)](docs/img/cspace-poster.jpeg)](docs/video/cspace-demo.mp4)
+https://github.com/user-attachments/assets/95074cbb-d607-413d-9741-36a542ae4ae2
 
-<sub>▶ **[Click for the 35s tour](docs/video/cspace-demo.mp4)** — establishing
-drift, orbit down to the tool ring, a hover card, an in-place session swap from
-the library, then out to the chronogram plate. Everything above and in the video
-is the bundled synthetic demo session (`npm run dev`, then `/?demo=1`) — nothing
-in it comes from a real transcript.</sub>
+<sub>Establishing drift, orbit down to the tool ring, a hover card, an in-place
+session swap from the library panel, then out to the chronogram plate. Everything
+above and in the video is the bundled synthetic demo session (`npm run dev`, then
+`/?demo=1`) — nothing in it comes from a real transcript. The same file is
+committed at [`docs/video/cspace-demo.mp4`](docs/video/cspace-demo.mp4).</sub>
 
 **C-Space renders an AI coding-agent session as a place.** It reads session
 transcripts **from your own machine** — Claude Code's `~/.claude/projects` is the
