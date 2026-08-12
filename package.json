@@ -1,0 +1,27 @@
+{
+  "name": "c-space",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "dev": "vite --port 5199 --strictPort",
+    "start": "node tools/cspace.mjs",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "build": "vite build",
+    "parse": "node tools/parse-session.mjs",
+    "demo": "node tools/make-demo.mjs",
+    "allowlist": "node tools/allowlist-init.mjs",
+    "build-library": "node tools/build-library.mjs",
+    "live": "node tools/live-server.mjs"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "vite": "^8.2.1"
+  }
+}

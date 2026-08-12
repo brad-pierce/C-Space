@@ -1,0 +1,11 @@
+node_modules/
+dist/
+# generated from local Claude Code session transcripts — never commit
+public/data/
+# critique evidence / working screenshots
+shots/
+.playwright-mcp/
+# local curated project allowlist — your private project names, never commit
+cspace.allowlist.json
+# scratch files from verification agents
+.tmp-*

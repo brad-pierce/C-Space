@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy this file to cspace.allowlist.json (gitignored) and list the project-directory slugs C-Space may read from ~/.claude/projects. This is a CURATED allowlist: only the projects you list are ever exposed by the tail server — session transcripts are sensitive, so nothing is shown until you opt a project in. Slugs are the munged directory names under ~/.claude/projects (path separators become '-'). A slug also matches that project's git worktrees. With no cspace.allowlist.json present, NO sessions are shown.",
+  "allow": [
+    "C--Users-YOU",
+    "C--Users-YOU-myproject",
+    "-Users-YOU",
+    "-Users-YOU-myproject"
+  ]
+}

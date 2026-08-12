@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- SomaFM icecast 403s ranged GETs that carry a Referer (hotlink guard);
+       media elements can't set per-request referrer policy, so: none at all -->
+  <meta name="referrer" content="no-referrer" />
+  <title>C-SPACE // claude session space</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #05060a; overflow: hidden; }
+    #app { position: fixed; inset: 0; }
+    #app canvas { display: block; }
+    #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+    /* shared chip row — ANY module adding a top-center chip appends it here;
+       flex stacking makes overlap structurally impossible */
+    #chips {
+      position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 10px; align-items: center; pointer-events: none;
+    }
+    #chips > * { pointer-events: auto; position: static !important; transform: none !important; }
+    #boot {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #19c6d1; font: 12px/1.6 "Cascadia Code", ui-monospace, monospace;
+      letter-spacing: 0.35em; z-index: 20; background: #05060a;
+      transition: opacity 0.9s ease; text-transform: uppercase;
+    }
+    #boot.done { opacity: 0; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="hud"><div id="chips"></div></div>
+  <div id="boot">initializing c-space…</div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
