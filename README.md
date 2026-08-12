@@ -6,7 +6,7 @@
 
 ### 35-second tour
 
-[![Watch the C-Space tour — click to play](docs/img/cspace-poster.jpeg)](docs/video/cspace-demo.mp4)
+[![Watch the 35-second C-Space tour (click to play)](docs/img/cspace-poster.jpeg)](docs/video/cspace-demo.mp4)
 
 <sub>▶ **[Click for the 35s tour](docs/video/cspace-demo.mp4)** — establishing
 drift, orbit down to the tool ring, a hover card, an in-place session swap from
