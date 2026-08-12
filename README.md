@@ -4,8 +4,15 @@
 
 ![The chronogram — the entire session as a radial infographic: tool calls, dialogue, subagent Gantt arcs and hooks in concentric lanes, with a radar-sweep playhead](docs/img/cspace-chronogram.jpeg)
 
-<sub>Both stills are the bundled synthetic demo session (`npm run dev` then
-`/?demo=1`) — nothing in them comes from a real transcript.</sub>
+### 35-second tour
+
+[![Watch the C-Space tour — click to play](docs/img/cspace-poster.jpeg)](docs/video/cspace-demo.mp4)
+
+<sub>▶ **[Click for the 35s tour](docs/video/cspace-demo.mp4)** — establishing
+drift, orbit down to the tool ring, a hover card, an in-place session swap from
+the library, then out to the chronogram plate. Everything above and in the video
+is the bundled synthetic demo session (`npm run dev`, then `/?demo=1`) — nothing
+in it comes from a real transcript.</sub>
 
 **C-Space renders an AI coding-agent session as a place.** It reads session
 transcripts **from your own machine** — Claude Code's `~/.claude/projects` is the
