@@ -135,6 +135,17 @@ export default {
 .libx-close{pointer-events:auto;cursor:pointer;font-size:8px;letter-spacing:.24em;color:${C.hudDim};}
 .libx-close:hover{color:${C.hudText};}
 
+/* --- wall mode selector: what an unattended display does --- */
+.libx-wall{display:flex;align-items:center;gap:8px;padding:8px 16px 9px;
+ border-bottom:1px solid ${C.cache}2e;font-size:8px;letter-spacing:.24em;color:${C.hudDim};}
+.libx-wall-h{margin-right:2px;}
+.libx-wm{pointer-events:auto;cursor:pointer;padding:3px 9px;color:${C.hudDim};
+ box-shadow:inset 0 0 0 1px ${C.hudDim}3a;transition:color .15s ease,box-shadow .15s ease;}
+.libx-wm:hover{color:${C.hudText};box-shadow:inset 0 0 0 1px ${C.cache}66;}
+.libx-wm.on{color:${C.coreHot};box-shadow:inset 0 0 0 1px ${C.cache};
+ text-shadow:0 0 7px ${C.cache}66;}
+.libx-wall-note{margin-left:auto;color:${C.hudDim};opacity:.75;letter-spacing:.16em;}
+
 /* --- rows --- */
 .libx-rows{max-height:min(52vh,420px);overflow-y:auto;overflow-x:hidden;padding-bottom:6px;}
 .libx-rows::-webkit-scrollbar{width:6px;}
@@ -195,6 +206,42 @@ export default {
     const ph = div('libx-ph', panel);
     div('libx-title', ph, '// SESSION LIBRARY');
     const closeBtn = div('libx-close', ph, '[ESC] CLOSE');
+    // ---- wall mode selector -------------------------------------------------
+    // The program an unattended display runs. Lives here because the library IS
+    // the program surface. Persisted to localStorage; ?wall= overrides a single
+    // load without rewriting the stored choice (main.js resolves precedence).
+    const WALL = [
+      ['live', 'LIVE', 'follows active sessions'],
+      ['library', 'LIBRARY', 'archive reel only, never cuts away'],
+      ['solo', 'SOLO', 'holds one session'],
+    ];
+    const wallRow = div('libx-wall', panel);
+    div('libx-wall-h', wallRow, '// WALL MODE');
+    const wallNote = div('libx-wall-note', wallRow, '');
+    const wallChips = {};
+    for (const [mode, label, blurb] of WALL) {
+      const chip = div('libx-wm', wallRow, label);
+      chip.title = blurb;
+      wallChips[mode] = chip;
+      chip.addEventListener('click', () => setWall(mode));
+      wallRow.insertBefore(chip, wallNote);   // note stays right-aligned last
+    }
+    const paintWall = () => {
+      const cur = ctx.state.wallMode ?? 'live';
+      for (const [mode] of WALL) {
+        const cls = 'libx-wm' + (mode === cur ? ' on' : '');
+        if (wallChips[mode].className !== cls) wallChips[mode].className = cls;
+      }
+      const blurb = (WALL.find((w) => w[0] === cur) ?? WALL[0])[2];
+      if (wallNote.textContent !== blurb) wallNote.textContent = blurb;
+    };
+    const setWall = (mode) => {
+      ctx.state.wallMode = mode;
+      try { localStorage.setItem('cspace-wall', mode); } catch { /* storage off */ }
+      paintWall();
+    };
+    paintWall();
+
     const rowsHost = div('libx-rows', panel);
 
     // ---- navigation — main.js reads these params at boot --------------------

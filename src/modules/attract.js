@@ -50,6 +50,10 @@
 //     AND live interrupt) for 90s; the current session just keeps playing.
 //     Someone is at the cabinet — don't yank the view. ESC never exits
 //     attract; it already has other duties (library panel close).
+//   · WALL MODE (ctx.state.wallMode, see main.js) decides the program:
+//     'live' advances AND interrupts (default) · 'library' advances but never
+//     cuts to a live session · 'solo' does neither. Set by the selector in the
+//     library panel, persisted, overridable per-load with ?wall=.
 //   · THE INTERRUPT IS FOR AN UNATTENDED CABINET, and stands down entirely
 //     (not merely for the courtesy window) when the human has expressed intent:
 //     a library row PICK (attract.markUserPicked(), cleared on the next
@@ -243,8 +247,9 @@ export default {
         //     previously only blocked ADVANCE, so a frozen study session still
         //     got pulled to the tail once courtesy lapsed. That was a bug.
         const chosen = !!this._ctx?.state?.userPicked;
+        const follows = (this._ctx?.state?.wallMode ?? 'live') === 'live';
         const frozen = !!this._ctx?.state?.frozen;
-        if (live && !chosen && !frozen && performance.now() >= this._holdUntil && !this._swapping) {
+        if (live && follows && !chosen && !frozen && performance.now() >= this._holdUntil && !this._swapping) {
           this._depart(`/?live=${encodeURIComponent(live.id)}`);
         }
         break;
@@ -389,6 +394,10 @@ export default {
     // away the very thing being studied. Hold the dwell clocks too, so
     // unfreezing gives a full DONE_HOLD_MS rather than an instant cut.
     if (ctx?.state?.frozen) { this._doneSince = null; this._t0 = performance.now(); return; }
+    // 'solo' holds one session: no advance, no interrupt. The dwell clock is
+    // held too, so switching back to a rotating mode grants a full dwell
+    // rather than advancing the instant the mode changes.
+    if ((ctx?.state?.wallMode ?? 'live') === 'solo') { this._doneSince = null; this._t0 = performance.now(); return; }
     // done-hold accumulates even during courtesy — once the hold expires an
     // already-finished timeline advances on the next frame.
     const now = performance.now();

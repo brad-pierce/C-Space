@@ -98,6 +98,7 @@ All parameters apply to the main page (`index.html`) unless noted.
 | `q` | e.g. `high` | Quality hint passed to modules via `ctx.quality` (default `high`) |
 | `session` | library id | Load an archived session from `/data/library/<id>.json` instead of the flagship |
 | `live` | `1` or session uuid | Live mode: `1` streams the most recent active session, a uuid streams that specific one |
+| `wall` | `live`, `library`, `solo` | Wall mode for this load only — does not overwrite the saved setting (see **Wall mode**) |
 | `demo` | `1` | Play the bundled synthetic session outright, even on a machine that has its own data. The only session safe to screenshot or screen-share — nothing in it came from a real transcript |
 
 ## Controls
@@ -117,6 +118,26 @@ Fleet view (`fleet.html`):
 - **WASD / arrow keys** — engage street mode, a first-person fly-through from the current pose (no teleport)
 - In street mode: **drag** = look, **Q/E** (or PageDown/PageUp) = sink/rise, **SHIFT** = sprint, **wheel** = dolly along the look ray
 - **ESC** (or 10s of no input) — hand back to the aerial drift
+
+## Wall mode
+
+C-Space left running unattended has to decide what to *do*, and there is no
+single right answer — so it is a setting, not a default. Pick it from the
+**WALL MODE** row at the top of the library panel (**L**); the choice persists
+in `localStorage`. `?wall=<mode>` overrides a single load without overwriting
+the saved setting, which is what you want for a kiosk shortcut, a demo, or a
+screenshot.
+
+| Mode | What an idle display does |
+| --- | --- |
+| **LIVE** (default) | Follows the work. Plays the archive reel, but cuts to any session that goes active, within one 15s poll. |
+| **LIBRARY** | Stays in the archive. Rotates the library — flagship first, then by tool-call volume, so the busiest sessions lead — and never cuts away to a live session. |
+| **SOLO** | Holds one session. No advance, no interrupt. |
+
+Regardless of mode, C-Space never yanks a session away from someone who is
+plainly there: an explicit library pick and **F**-freeze both suspend switching,
+and any click or keypress buys a 90-second reprieve. A `?session=<id>` URL
+without `&attract=1` is not a program at all and never switches.
 
 ## Sound — and the one outbound network connection
 

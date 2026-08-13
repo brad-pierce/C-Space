@@ -58,6 +58,10 @@
 //   ctx.state.filterTool: modules dim non-matching content when set.
 //   ctx.state.frozen: F-key study freeze — timeline paused and the camera held
 //     under manual control (no idle-revert to cinematic). cameraRig owns it.
+//   ctx.state.wallMode: 'live' | 'library' | 'solo' — what an unattended
+//     display does (follow live work / stay in the archive / hold one session).
+//     Resolved at boot from ?wall= then localStorage 'cspace-wall'; attract.js
+//     obeys it, library.js renders the selector and persists changes.
 //   ctx.state.userPicked: the user chose the playing session from the library.
 //     attract.js stands its live interrupt down while set, so a deliberately
 //     chosen session is never yanked to the tail; cleared on a self-driven
@@ -412,6 +416,28 @@ async function boot() {
   camera.position.set(0, 14, 46);
   camera.lookAt(0, LAYOUT.coreY, 0);
 
+  // WALL MODE — what an unattended C-Space should DO. Three programs, because
+  // "a display showing agent sessions" means different things to different
+  // people and the app used to silently pick one:
+  //   'live'    follow the work: play the library, but cut to any session that
+  //             goes active (the arcade cabinet noticing a player). Default.
+  //   'library' stay in the archive: rotate the library forever and never cut
+  //             to a live session. For a wall that should keep showing the
+  //             richest sessions rather than whatever just started.
+  //   'solo'    one session, held: no advance, no interrupt.
+  // Precedence: ?wall=<mode> for this load only (demos, screenshots, kiosks
+  // launched from a shortcut) > the persisted choice > 'live'. The URL form
+  // deliberately does NOT persist, so a one-off link cannot silently rewrite
+  // the machine's setting.
+  const WALL_MODES = ['live', 'library', 'solo'];
+  const wallParam = params.get('wall');
+  let wallMode = 'live';
+  try {
+    const stored = localStorage.getItem('cspace-wall');
+    if (WALL_MODES.includes(stored)) wallMode = stored;
+  } catch { /* private mode / storage disabled */ }
+  if (WALL_MODES.includes(wallParam)) wallMode = wallParam;
+
   const pickEntries = new Map();
   // Declared ahead of ctx so swapSession (which closes over both) can never hit
   // a temporal-dead-zone reference, even if a module called it from init().
@@ -432,7 +458,7 @@ async function boot() {
       unregister(obj) { pickEntries.delete(obj); },
     },
     swapSession,
-    state: { filterTool: null, frozen: false, userPicked: false },
+    state: { filterTool: null, frozen: false, userPicked: false, wallMode },
   };
   initial = null;   // ctx owns it now — drop the boot-session reference
 
