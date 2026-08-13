@@ -50,6 +50,13 @@
 //     AND live interrupt) for 90s; the current session just keeps playing.
 //     Someone is at the cabinet — don't yank the view. ESC never exits
 //     attract; it already has other duties (library panel close).
+//   · THE INTERRUPT IS FOR AN UNATTENDED CABINET, and stands down entirely
+//     (not merely for the courtesy window) when the human has expressed intent:
+//     a library row PICK (attract.markUserPicked(), cleared on the next
+//     self-driven advance) or F-freeze. Watching an archive you deliberately
+//     chose must never be interrupted by a session starting elsewhere; a
+//     ?session=<id> URL without &attract=1 is not attract at all and was always
+//     immune.
 //   · reset(ctx) — main.js calls this after ANY swap, including one the library
 //     panel started. Re-derives the pointer from ctx.playing.sessionId and
 //     restarts the dwell clock, so a hand-picked session becomes the new place
@@ -225,8 +232,19 @@ export default {
         try { roster = await this._roster(base); } catch { this._base = null; continue; }
         this._base = base;
         window.__CSPACE_ROSTER = roster;
-        const live = roster.find((s) => s.active);  // roster is mtime-desc
-        if (live && performance.now() >= this._holdUntil && !this._swapping) {
+        const live = roster.find((s) => s.active);
+        // The interrupt is for an UNATTENDED cabinet. It must not yank a
+        // session away from someone who is actually watching, so it stands down
+        // when either is true:
+        //   · the user PICKED this session (library row) — an explicit choice
+        //     outranks the program; cleared when the reel advances on its own,
+        //     at which point nobody has chosen what is on screen again.
+        //   · F-freeze is held — that is the "hold this frame" gesture, and it
+        //     previously only blocked ADVANCE, so a frozen study session still
+        //     got pulled to the tail once courtesy lapsed. That was a bug.
+        const chosen = !!this._ctx?.state?.userPicked;
+        const frozen = !!this._ctx?.state?.frozen;
+        if (live && !chosen && !frozen && performance.now() >= this._holdUntil && !this._swapping) {
           this._depart(`/?live=${encodeURIComponent(live.id)}`);
         }
         break;
@@ -287,6 +305,8 @@ export default {
   // back in. No navigation, so the WebGL context, the renderer and (the whole
   // point) the SomaFM <audio> element all survive: the radio never re-buffers.
   async _advance() {
+    // The program picked this entry, not the user — the interrupt applies again.
+    if (this._ctx?.state) this._ctx.state.userPicked = false;
     if (this._leaving || this._swapping || !this._list || !this._list.length) return;
     const j = this._nextIndex();
     const entry = this._list[j];

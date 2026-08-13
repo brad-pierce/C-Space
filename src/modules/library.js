@@ -235,6 +235,10 @@ export default {
       // the session on screen is untouched, so the highlight is still correct.
       done?.then?.((ok) => {
         if (!ok) { console.warn('[c-space] library: swap refused for', id ?? 'flagship'); return; }
+        // An explicit pick outranks the program: tell attract to stand its live
+        // interrupt down, so a session you chose to watch is not yanked to the
+        // tail 90s later. Cleared when the reel advances on its own.
+        ctx.state.userPicked = true;
         // Keep the URL honest, exactly as attract's advance does. A swap never
         // navigates, so without this the address bar still names the PREVIOUS
         // session and a manual refresh would reload that one instead of what is

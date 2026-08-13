@@ -58,6 +58,10 @@
 //   ctx.state.filterTool: modules dim non-matching content when set.
 //   ctx.state.frozen: F-key study freeze — timeline paused and the camera held
 //     under manual control (no idle-revert to cinematic). cameraRig owns it.
+//   ctx.state.userPicked: the user chose the playing session from the library.
+//     attract.js stands its live interrupt down while set, so a deliberately
+//     chosen session is never yanked to the tail; cleared on a self-driven
+//     advance. library.js sets it.
 //
 // SESSION SWAP CONTRACT (attract advance without a page load) -----------------
 // PROBLEM this exists to solve: attract used to advance between playlist entries
@@ -428,7 +432,7 @@ async function boot() {
       unregister(obj) { pickEntries.delete(obj); },
     },
     swapSession,
-    state: { filterTool: null, frozen: false },
+    state: { filterTool: null, frozen: false, userPicked: false },
   };
   initial = null;   // ctx owns it now — drop the boot-session reference
 
