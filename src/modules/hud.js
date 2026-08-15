@@ -50,6 +50,8 @@
 //     on the bar and hold their nodes alive (this module's equivalent of a GPU
 //     leak, and the reason the mark nodes are tracked in _marks).
 //   · the identity lines, from ctx.playing + the new session's meta.
+//   · the CONTEXT CEILING (capOf) and the meter denominator drawn from it —
+//     the cap is per-session, so a swap can move it (200k Codex ↔ 1M Claude).
 // What reset deliberately KEEPS, built once and session-independent: the <style>
 // block, the whole DOM skeleton and corner layout, the ticker node pool, the
 // legend chips (keyed off the stable TOOL_COLORS ring), the scratch vectors,
@@ -91,6 +93,13 @@ const trunc = (s, n) => {
 };
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const pad = (n, w) => String(n).padStart(w, '0');
+// The PLAYING session's context ceiling. ctx.contextCap is per-session (a Codex
+// session on a 200k window reads against 200k, a Claude one against 1M);
+// ctx.CONTEXT_TOKEN_CAP is the build-wide fallback. The meter percentage, its
+// denominator text and the tower fill-line annotation all divide by this, so it
+// is RE-READ in reset() — a swap changes the ceiling, and a carried-over cap
+// would report a context-heavy session as near-empty.
+const capOf = (ctx) => Math.max(1, ctx.contextCap ?? ctx.CONTEXT_TOKEN_CAP);
 
 export default {
   name: 'hud',
@@ -99,7 +108,7 @@ export default {
     const C = ctx.CSS;
     const tl = ctx.timeline;
     const freeze = ctx.params.get('freeze') === '1';
-    this._cap = ctx.CONTEXT_TOKEN_CAP;
+    this._cap = capOf(ctx);
     this._nofx = freeze;
 
     // ---- prefix sums: O(1) vitals at any timeline cursor, seek-proof --------
@@ -354,7 +363,11 @@ export default {
     this._pct = span('hudx-pct', mh, '0.0%');
     const mnum = div('hudx-mnum', met);
     this._num = span('hudx-mv', mnum, '0');
-    span('hudx-mdim', mnum, ` / ${this._cap.toLocaleString('en-US')}`);
+    // denominator is the SESSION's window, not a build constant — held so
+    // reset() can rewrite it when a swap moves the ceiling
+    this._den = span('hudx-mdim', mnum, '');
+    this._denStr = '';
+    this._renderCap();
     const mbar = div('hudx-mbar', met);
     this._mFill = div('hudx-mfill', mbar);
     this._mTip = div('hudx-mtip', mbar);
@@ -584,6 +597,15 @@ export default {
     if (el.textContent !== s) el.textContent = s;
   },
 
+  // Paint the context meter's denominator from the current ceiling. Shared by
+  // init and reset so there is one place the "/ 1,000,000" text is produced —
+  // a 200k session must read "/ 200,000", or the meter's own percentage and the
+  // number beside it disagree about what window the session ran in.
+  _renderCap() {
+    const s = ` / ${this._cap.toLocaleString('en-US')}`;
+    if (s !== this._denStr) { this._denStr = s; this._den.textContent = s; }
+  },
+
   // Grow the prefix arrays to cover events [0..upto) — live mode appends past
   // the boot-time count. Doubles capacity on reallocation; continues running
   // sums from the previous tail, so already-summed events are never rescanned.
@@ -685,6 +707,13 @@ export default {
   // resources are DOM nodes and typed arrays; the per-session nodes (scrubber
   // marks) are removed in _buildScrubMarks, and the typed arrays are reused.
   reset(ctx) {
+    // RE-READ THE CEILING FIRST. It is per-session: the meter percentage, the
+    // denominator text and the tower fill-line annotation are all divisions by
+    // it, and every one of their value-gate caches is dropped below so the new
+    // scale is written on the next frame rather than skipped as "unchanged".
+    this._cap = capOf(ctx);
+    this._renderCap();
+
     this._syncSession(ctx);
     this._renderIdentity(ctx);
     this._buildScrubMarks(ctx);

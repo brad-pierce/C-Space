@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 // live-server.mjs — tails live Claude Code sessions and streams viz items over SSE.
 //
-//   GET /sessions            → JSON list of recently-active sessions
+//   GET /sessions            → JSON list of allowed sessions, ACROSS SOURCES.
+//                              Claude Code rows come from the local tail; rows
+//                              from other harnesses (Codex, Hermes, OpenClaw)
+//                              come through tools/adapters/ and appear only when
+//                              the allowlist opts that source in. Every row
+//                              carries `source` and `streamable`.
 //   GET /stream?id=<uuid>    → SSE: full replay of the session so far, then live tail
-//                              (omit id → most recently modified active session)
+//                              (omit id → most recently modified active session).
+//                              CLAUDE ONLY — an allowed session from another
+//                              source is refused 501 with the archive path,
+//                              because the tail is a Claude JSONL reader.
 //
 // Also watches the session's subagent transcript dirs: each agent-*.jsonl that
 // appears becomes a synthetic spawn (drone), and one that stops growing for
@@ -73,6 +81,73 @@ export function guard(req, res) {
 // in. Override the path with the CSPACE_ALLOWLIST env var. Slugs are the munged
 // directory names under ~/.claude/projects; each also matches that project's
 // git worktrees.
+//
+// SOURCE-AWARE. C-Space reads more than one harness (Claude Code, Codex, Hermes,
+// OpenClaw — see tools/adapters/). The config therefore has two keys:
+//
+//   "allow"    Claude Code project slugs. UNCHANGED meaning, unchanged format.
+//   "sources"  OPTIONAL map: source id -> list of that source's project labels.
+//              Ids are 'codex' | 'hermes' | 'openclaw' (and 'claude', which is
+//              just another spelling of "allow"). "*" in a list means every
+//              project of that source.
+//
+// THE SAFE DEFAULT IS THE POINT: a source with NO entry under "sources" exposes
+// NOTHING, and its store is never even opened. A config written before this key
+// existed — no "sources" at all — therefore behaves EXACTLY as it did: Claude
+// projects per "allow", and zero Codex / Hermes / OpenClaw. The mere presence of
+// ~/.codex, ~/.hermes or ~/.openclaw on the machine is never consent.
+//
+// Shorthand: an "allow" entry may carry a source prefix — "codex:the-dreaming"
+// is identical to "sources": { "codex": ["the-dreaming"] }. Claude slugs never
+// contain a colon, so an unprefixed entry is always a Claude slug.
+//
+// Matching for non-Claude sources is EXACT on the row's project label (or "*").
+// A session whose project label could not be recovered (null) is matched only
+// by "*" — an unlabelled session can never slip in under a named project.
+export const KNOWN_SOURCES = ['claude', 'codex', 'hermes', 'openclaw'];
+const SOURCE_PREFIX = new RegExp(`^(${KNOWN_SOURCES.join('|')}):(.+)$`);
+
+// Shape: { claude: string[], sources: { [id]: string[] } }.
+// KEY PRESENCE in `sources` is the opt-in — an explicitly empty list means
+// "this source is configured and currently exposes nothing", which is still
+// nothing. A MISSING key means the same thing but also skips the store read.
+function normalizeAllowlist(j) {
+  const cfg = { claude: [], sources: Object.create(null) };
+  let sawAny = false;
+
+  const arr = Array.isArray(j) ? j : j?.allow;
+  if (Array.isArray(arr)) {
+    sawAny = true;
+    for (const raw of arr) {
+      if (typeof raw !== 'string' || !raw) continue;
+      const m = SOURCE_PREFIX.exec(raw);
+      if (!m) { cfg.claude.push(raw); continue; }
+      const [, id, project] = m;
+      if (id === 'claude') cfg.claude.push(project);
+      else (cfg.sources[id] ??= []).push(project);
+    }
+  }
+
+  const map = !Array.isArray(j) && j && typeof j.sources === 'object' && j.sources ? j.sources : null;
+  if (map) {
+    sawAny = true;
+    for (const [id, val] of Object.entries(map)) {
+      if (id.startsWith('_')) continue;                      // "_comment"-style keys
+      if (!KNOWN_SOURCES.includes(id)) {
+        console.warn(`[cspace] allowlist: unknown source "${id}" ignored (known: ${KNOWN_SOURCES.join(', ')})`);
+        continue;
+      }
+      const list = val === true || val === '*'
+        ? ['*']
+        : Array.isArray(val) ? val.filter((s) => typeof s === 'string' && s) : [];
+      if (id === 'claude') { cfg.claude.push(...list); continue; }
+      cfg.sources[id] = [...(cfg.sources[id] ?? []), ...list];
+    }
+  }
+
+  return sawAny ? cfg : null;
+}
+
 function loadAllowlist() {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
   // CSPACE_ALLOWLIST, when set, is AUTHORITATIVE — it is not merely a first
@@ -85,9 +160,8 @@ function loadAllowlist() {
   for (const p of candidates) {
     try {
       if (!existsSync(p)) continue;
-      const j = JSON.parse(readFileSync(p, 'utf8'));
-      const arr = Array.isArray(j) ? j : j.allow;
-      if (Array.isArray(arr)) return arr.filter((s) => typeof s === 'string' && s);
+      const cfg = normalizeAllowlist(JSON.parse(readFileSync(p, 'utf8')));
+      if (cfg) return cfg;
     } catch (e) {
       console.warn('[cspace] allowlist parse error at ' + p + ': ' + e.message);
     }
@@ -107,11 +181,33 @@ function loadAllowlist() {
       ? `         ${found} project(s) found locally; none are exposed until you opt them in.\n`
       : `         No project directories found under ${PROJECTS}.\n`) +
     '         Fix:  npm run allowlist     (lists them and scaffolds the config)');
-  return [];
+  return { claude: [], sources: Object.create(null) };
 }
-const ALLOWED_PROJECTS = loadAllowlist();
+const ALLOWLIST = loadAllowlist();
+const ALLOWED_PROJECTS = ALLOWLIST.claude;
 const projectAllowed = (proj) =>
   ALLOWED_PROJECTS.some(a => proj === a || proj.startsWith(a + '--claude-worktrees'));
+
+/** Has this source been explicitly opted into? Claude is always in play (its
+ *  own gate is ALLOWED_PROJECTS); every other source must appear in "sources". */
+export function sourceOptedIn(id) {
+  return id === 'claude' || Object.prototype.hasOwnProperty.call(ALLOWLIST.sources, id);
+}
+
+/** The source ids this machine's config permits reading at all. */
+export function optedInSources() {
+  return KNOWN_SOURCES.filter(sourceOptedIn);
+}
+
+/** THE gate: may a session from `source` in `project` be exposed? */
+export function sessionAllowed(source, project) {
+  if (source === 'claude') return typeof project === 'string' && projectAllowed(project);
+  const list = ALLOWLIST.sources[source];
+  if (!Array.isArray(list) || list.length === 0) return false;
+  if (list.includes('*')) return true;
+  if (typeof project !== 'string' || !project) return false;   // unlabelled: "*" only
+  return list.includes(project);
+}
 
 // ---------- session discovery ----------
 // A session orchestrating a workflow writes to <id>/subagents/**/agent-*.jsonl
@@ -164,6 +260,108 @@ export function listSessions() {
   }
   out.sort((a, b) => b.mtime - a.mtime);
   return out;
+}
+
+// ---------- other harnesses (source adapters) ----------
+// The registry is reached by LAZY DYNAMIC IMPORT, never a static one:
+// adapters/claude.mjs imports listSessions from this file, so a static import
+// here would close a module cycle that breaks whenever claude.mjs is the module
+// reached first. Loading at call time happens after every module body has run,
+// so the cycle never exists. A registry that fails to load degrades to
+// Claude-only rather than taking the server down.
+let registryPromise = null;
+function registry() {
+  if (!registryPromise) {
+    registryPromise = import('./adapters/index.mjs').catch((e) => {
+      console.warn('[cspace] source adapters unavailable: ' + (e?.message ?? e));
+      return null;
+    });
+  }
+  return registryPromise;
+}
+
+// Non-Claude discovery is comparatively expensive (Codex reads the first line of
+// every rollout to recover its project; Hermes/OpenClaw open SQLite), and the
+// fleet HUD polls /sessions every 5s. These rows are archive-only and never
+// stream, so a short cache costs nothing in freshness.
+const SOURCE_CACHE_MS = 30_000;
+let sourceCache = { at: 0, rows: [] };
+
+async function nonClaudeSessions() {
+  // A source whose list is empty is opted in but exposes nothing, so there is
+  // no reason to open its store either — same visible result, less reading.
+  const extra = optedInSources()
+    .filter((id) => id !== 'claude' && (ALLOWLIST.sources[id]?.length ?? 0) > 0);
+  if (!extra.length) return [];                       // nothing opted in — no store is touched
+  if (sourceCache.rows.length && Date.now() - sourceCache.at < SOURCE_CACHE_MS) return sourceCache.rows;
+  const reg = await registry();
+  if (!reg) return [];
+  let rows = [];
+  try {
+    // `sources` restricts which adapters are consulted AT ALL; `filter` applies
+    // the per-project allowlist. Both gates, every time.
+    rows = reg.discoverAll({ sources: extra, filter: (r) => sessionAllowed(r.source, r.project) })
+      .map((r) => ({
+        ...r,
+        sourceLabel: reg.sourceLabel(r.source) ?? r.source,
+        libraryId: reg.libraryId(r.source, r.id),
+        // HONESTY FLAGS. The SSE tail is an incremental Claude JSONL reader;
+        // no other adapter can stream, so these rows are marked non-streamable
+        // AND forced inactive so nothing in the UI treats them as a live dive.
+        // /stream refuses them explicitly (501) rather than pretending.
+        active: false,
+        streamable: false,
+      }));
+  } catch (e) {
+    console.warn('[cspace] source discovery failed: ' + (e?.message ?? e));
+    rows = [];
+  }
+  sourceCache = { at: Date.now(), rows };
+  return rows;
+}
+
+// The full allowed roster: Claude sessions (allowlist-gated as always) plus
+// every allowed session from every opted-in source, each tagged with `source`.
+// Active rows sort first, then newest — for a Claude-only config this is
+// identical to the old pure mtime sort, because `active` is derived from mtime.
+export async function listAllowedSessions() {
+  const rows = listSessions().map((s) => ({
+    ...s, source: 'claude', sourceLabel: 'Claude Code', libraryId: s.id, streamable: true,
+  }));
+  rows.push(...await nonClaudeSessions());
+  rows.sort((a, b) =>
+    (Number(b.active === true) - Number(a.active === true)) || ((b.mtime ?? 0) - (a.mtime ?? 0)));
+  return rows;
+}
+
+// One-line-per-source coverage hint, printed ONCE per process. Says only how
+// many sessions a store holds and how many are exposed — never a project name.
+// Those labels are cwd- and title-derived (client names, internal codenames) and
+// this line lands in terminals that get screen-shared and pasted into issues.
+let coverageReported = false;
+export async function reportSourceCoverage() {
+  if (coverageReported) return;
+  coverageReported = true;
+  const reg = await registry();
+  if (!reg) return;
+  let present;
+  try { present = reg.storesPresent(); } catch { return; }
+  for (const { id, label } of present) {
+    if (id === 'claude') continue;
+    let all;
+    try { all = reg.discoverAll({ sources: [id] }); } catch { continue; }
+    if (!all.length) continue;
+    const exposed = sourceOptedIn(id)
+      ? all.filter((r) => sessionAllowed(r.source, r.project)).length
+      : 0;
+    if (exposed) {
+      console.log(`[cspace] ${label}: ${exposed} of ${all.length} session(s) exposed (archive only — not streamable).`);
+    } else {
+      console.warn(
+        `[cspace] ${label} store present with ${all.length} session(s) — 0 exposed. ` +
+        `Opt in per project:  "sources": { "${id}": ["<project>"] }  (or "*") in cspace.allowlist.json.`);
+    }
+  }
 }
 
 // ---------- incremental file tail (poll-based; fs.watch is unreliable on win) ----------
@@ -273,11 +471,42 @@ function sse(res) {
   return (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+// An id that is not a tailable Claude session is either unknown (404) or a
+// session from a source that CANNOT be streamed (501). BE HONEST ABOUT
+// STREAMING: the tail above is an incremental Claude JSONL reader — Codex,
+// Hermes and OpenClaw have no incremental reader behind them, so their rows are
+// archive-only and this endpoint refuses them with a message that names the
+// supported path rather than a bare failure.
+function refuseOrNotFound(id, res) {
+  const notFound = () => {
+    try {
+      if (!res.headersSent) res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('no session');
+    } catch { /* client already gone */ }
+  };
+  if (!id) { notFound(); return; }
+  nonClaudeSessions().then((rows) => {
+    const row = rows.find((r) => String(r.id) === id || r.libraryId === id);
+    if (!row) { notFound(); return; }
+    res.writeHead(501, { 'Content-Type': 'text/plain' });
+    res.end(
+      `live streaming is not supported for ${row.sourceLabel} sessions.\n` +
+      `The SSE tail is an incremental Claude Code JSONL reader; the ${row.source} adapter ` +
+      `can only read a session in one pass, so there is nothing honest to tail.\n` +
+      `Use archive playback instead:  npm run build-library   then open  /?session=${row.libraryId}\n`);
+  }).catch(notFound);
+}
+
 // ---------- request handling (shared with tools/cspace.mjs) ----------
 // Returns a handler(req, res) -> boolean: true if the request was one of the
 // tail endpoints (/sessions, /stream) and has been handled, false otherwise.
 export function createTailHandler() {
   let activeStreams = 0;   // per-handler concurrent SSE count (see MAX_STREAMS)
+
+  // Fire-and-forget: tell the operator, once, what each non-Claude store on this
+  // machine contributes (counts only). Deliberately here rather than at module
+  // load so importing this file for its exports (adapters, tests) stays silent.
+  void reportSourceCoverage();
 
   // SAFETY NET. Everything below runs inside an http request callback, where an
   // uncaught throw does not just fail the request — it takes the whole runner
@@ -304,12 +533,24 @@ export function createTailHandler() {
 
   function serve(url, req, res) {
     if (url.pathname === '/sessions') {
-      // `path` is the absolute transcript filename — it leaks the OS username
-      // and home layout, and no frontend reads it. Strip it from the wire; the
-      // internal row keeps it for the tail (and for build-library/adapters).
-      const rows = listSessions().slice(0, 40).map(({ path, ...row }) => row);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(rows));
+      // Async because non-Claude sources are reached through a lazily-imported
+      // adapter registry. Its own rejection path is handled inside
+      // listAllowedSessions (degrades to Claude-only), so this only has to
+      // cover a write to an already-closed socket.
+      listAllowedSessions().then((all) => {
+        // `path`/`dbPath` are absolute filenames — they leak the OS username and
+        // home layout, and no frontend reads them. Strip them from the wire; the
+        // internal row keeps them for the tail (and for build-library/adapters).
+        const rows = all.slice(0, 40).map(({ path, dbPath, ...row }) => row);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(rows));
+      }).catch((e) => {
+        console.error(`[cspace] /sessions failed: ${e?.stack ?? e}`);
+        try {
+          if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('internal error');
+        } catch { /* client already gone */ }
+      });
       return true;
     }
 
@@ -322,7 +563,10 @@ export function createTailHandler() {
       const sessions = listSessions();
       const id = url.searchParams.get('id');
       const target = id ? sessions.find(s => s.id === id) : sessions.find(s => s.active) ?? sessions[0];
-      if (!target) { res.writeHead(404); res.end('no session'); return true; }
+      // Only Claude sessions can be tailed. If the id names an allowed session
+      // from another source, say so plainly instead of 404-ing or — worse —
+      // pretending to stream something we can only read in one shot.
+      if (!target) { refuseOrNotFound(id, res); return true; }
 
       activeStreams++;
       let alive = true;

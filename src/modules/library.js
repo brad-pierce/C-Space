@@ -2,7 +2,7 @@
 // A top-center chip (click, or key L) toggles a panel listing every archived
 // session from /data/library/index.json: the flagship plus library rows with
 // vitals — project (compressed), duration, events, tool calls, subagents,
-// compactions, peak context as a thin bar against the 1M window — and a LIVE
+// compactions, peak context as a thin bar against THAT ROW'S OWN window — and a LIVE
 // row (pulsing dot) that tails a running session. ESC closes; fast fade/slide
 // on toggle. Registers nothing with ctx.pick (DOM only). Owns its own <style>
 // block. Hidden entirely in ?freeze=1 shot mode. No THREE, no canvas, no
@@ -49,6 +49,29 @@ const fmtK = (n) => {
 
 const fmtN = (n) => (n == null || !isFinite(n) ? '—' : String(n));
 
+// ---- per-row context ceilings ----------------------------------------------
+// The peak-context bar is a fraction of a WINDOW, and the window is a property
+// of the session, not of the build: measuring a 113k-peak Codex session that
+// ran on a 200k window against 1M renders it as a sliver next to a Claude row
+// and says something false about how context-heavy it was.
+//
+// A row states its own ceiling when the index carries one (contextCap). When it
+// does not, derive the smallest standard window that still contains the peak —
+// wrong only in the harmless direction (too generous), and never wrong by the
+// 5x that a hardcoded 1M is for a 200k session. Peaks past the ladder fall back
+// to the build-wide cap, and past that to the peak itself, so a bar can be full
+// but never overflows its track.
+const CAP_LADDER = [200_000, 400_000, 1_000_000];
+
+const deriveCap = (peak, fallback) => {
+  if (peak == null || !isFinite(peak) || peak <= 0) return fallback;
+  for (const c of CAP_LADDER) if (peak <= c) return c;
+  return Math.max(fallback, peak);
+};
+
+const rowCap = (cap, peak, fallback) =>
+  (cap != null && isFinite(cap) && cap > 0 ? cap : deriveCap(peak, fallback));
+
 export default {
   name: 'library',
 
@@ -56,7 +79,10 @@ export default {
     if (ctx.params.get('freeze') === '1') return; // shot mode: no library chrome
 
     const C = ctx.CSS;
-    const cap = ctx.CONTEXT_TOKEN_CAP;
+    // Build-wide fallback ceiling, read at CALL time (not captured): after a
+    // swap ctx.contextCap is the newly playing session's window, and rows with
+    // no ceiling of their own should fall back to something current.
+    const fallbackCap = () => Math.max(1, ctx.contextCap ?? ctx.CONTEXT_TOKEN_CAP);
 
     // WHAT IS PLAYING, read at call time. Derived from ctx.playing, never from
     // ctx.params: an in-place swap replaces ctx.playing and leaves the URL
@@ -84,6 +110,9 @@ export default {
         compactions:
           ctx.timeline?.compactions?.length ?? ctx.session?.compactions?.length,
         peakContext: meta.peakContext,
+        // the flagship IS the playing session here, so its ceiling is the one
+        // the tower and the meter are already using
+        contextCap: meta.contextCap ?? ctx.contextCap,
       };
     };
 
@@ -166,7 +195,7 @@ export default {
 .libx-proj{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .libx-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
 
-/* peak context: thin bar vs the 1M window */
+/* peak context: thin bar vs that row's own context window */
 .libx-peak{display:flex;align-items:center;gap:7px;}
 .libx-bar{flex:1;height:3px;background:${C.void}cc;box-shadow:inset 0 0 0 1px ${C.hudDim}55;position:relative;}
 .libx-fill{position:absolute;left:0;top:0;bottom:0;
@@ -317,11 +346,19 @@ export default {
       if (r.head) {
         el('span', null, pk, r.peakLabel ?? '');
       } else {
+        // measured against THIS row's ceiling, so a 113k peak on a 200k Codex
+        // window reads as the half-full session it was, not as a sliver beside
+        // a 1M Claude row. The denominator is not in the column (it would cost
+        // the layout), so the cell states it on hover.
+        const cap = rowCap(r.cap, r.peak, fallbackCap());
         const bar = div('libx-bar', pk);
         const frac = r.peak != null && isFinite(r.peak) ? Math.min(r.peak / cap, 1) : 0;
         const fill = div('libx-fill' + (frac > 0.9 ? ' hot' : ''), bar);
         fill.style.width = (frac * 100).toFixed(1) + '%';
         div('libx-pknum', pk, fmtK(r.peak));
+        pk.title = r.peak != null && isFinite(r.peak)
+          ? `PEAK ${Math.round(r.peak).toLocaleString('en-US')} / ${cap.toLocaleString('en-US')} · ${(frac * 100).toFixed(1)}%`
+          : 'PEAK CONTEXT UNKNOWN';
       }
       if (r.onClick) row.addEventListener('click', r.onClick);
       return row;
@@ -340,6 +377,9 @@ export default {
       sub: fmtN(s.subagents),
       comp: fmtN(s.compactions),
       peak: s.peakContext,
+      // the row's own window when the index states one; addRow derives it from
+      // the peak otherwise
+      cap: s.contextCap ?? s.meta?.contextCap,
       cur,
       onClick: () => (viaLive ? go({ live: s.id }) : activate(s.id)),
     });
@@ -355,7 +395,7 @@ export default {
       rowsHost.textContent = '';
       addRow({
         head: true, label: 'SESSION', project: 'PROJECT', dur: 'DUR', evt: 'EVT',
-        calls: 'CALLS', sub: 'SUB', comp: 'COMP', peakLabel: 'PEAK CTX / 1M',
+        calls: 'CALLS', sub: 'SUB', comp: 'COMP', peakLabel: 'PEAK CTX / CAP',
       });
       // LIVE — tail a running session via the local stream server
       addRow({

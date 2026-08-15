@@ -1,9 +1,27 @@
 {
-  "_comment": "Copy this file to cspace.allowlist.json (gitignored) and list the project-directory slugs C-Space may read from ~/.claude/projects. This is a CURATED allowlist: only the projects you list are ever exposed by the tail server — session transcripts are sensitive, so nothing is shown until you opt a project in. Slugs are the munged directory names under ~/.claude/projects (path separators become '-'). A slug also matches that project's git worktrees. With no cspace.allowlist.json present, NO sessions are shown.",
+  "_comment": "Copy this file to cspace.allowlist.json (gitignored). This is a CURATED allowlist and it is the ONLY thing that makes a session visible: session transcripts are sensitive, so nothing is exposed until you opt it in, and with no cspace.allowlist.json present NO sessions are shown at all. Override the config path with the CSPACE_ALLOWLIST env var (when set it is authoritative — a missing or malformed file there means 'expose nothing', never a silent fall back to this one).",
+
+  "_comment_allow": "\"allow\" lists Claude Code project-directory slugs from ~/.claude/projects — the munged directory names, where path separators became '-'. An entry also matches that project's git worktrees ('<slug>--claude-worktrees...'). Run `npm run allowlist` to see the slugs on this machine and scaffold the file.",
   "allow": [
     "C--Users-YOU",
     "C--Users-YOU-myproject",
     "-Users-YOU",
     "-Users-YOU-myproject"
-  ]
+  ],
+
+  "_comment_sources": "\"sources\" is OPTIONAL and covers the OTHER harnesses C-Space can read through tools/adapters/ — 'codex' (~/.codex), 'hermes' (~/.hermes), 'openclaw' (~/.openclaw). SAFE DEFAULT: a source with no key here exposes NOTHING and its store is never even opened — having ~/.codex on the machine is not consent. A config with no \"sources\" key therefore behaves exactly as it did before this key existed: your Claude projects, and zero Codex/Hermes/OpenClaw. 'claude' is also accepted here and simply merges into \"allow\".",
+
+  "_comment_sources_matching": "Each value is a list of that source's PROJECT LABELS, matched EXACTLY. Use [\"*\"] to expose every project of that source. An empty list [] means 'configured, exposing nothing' — the same visible result as omitting the key. A session whose project label could not be recovered shows up as null and is matched only by \"*\", so an unlabelled session can never slip in under a named project. Where the labels come from: codex = the basename of the session's cwd (e.g. 'the-dreaming'); hermes = the session title, falling back to its platform; openclaw = 'openclaw:<agentId>' plus the session title. NOTE that hermes/openclaw labels are content-derived, so \"*\" there exposes session titles as well as the sessions.",
+
+  "sources": {
+    "codex": [],
+    "hermes": [],
+    "openclaw": []
+  },
+
+  "_comment_shorthand": "Shorthand, if you would rather keep one flat list: an \"allow\" entry may carry a source prefix, so \"codex:the-dreaming\" is identical to \"sources\": { \"codex\": [\"the-dreaming\"] }. Claude slugs never contain a colon, so an unprefixed entry is always a Claude slug.",
+
+  "_comment_streaming": "Only Claude Code sessions can be TAILED LIVE — the SSE tail is an incremental Claude JSONL reader. Sessions from every other source are archive-only: they appear in /sessions marked \"streamable\": false (and never \"active\"), /stream refuses them with a 501 that points at archive playback, and they reach the screen via `npm run build-library` then /?session=<id>. Their library ids are namespaced ('codex-<id>') so free-form ids from different stores cannot collide.",
+
+  "_comment_after_editing": "After editing:  npm run build-library && npm run build && npm run start. On startup C-Space prints one line per non-Claude store found — counts only, never project names, because that line ends up in screen-shares."
 }

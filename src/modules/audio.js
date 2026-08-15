@@ -997,7 +997,8 @@ export default {
     bedTimer -= dt;
     if (bedTimer <= 0) {
       bedTimer = 0.25;
-      const fill = clamp01(state.context.ctx / CTX.CONTEXT_TOKEN_CAP);
+      // per-session ceiling, re-read every tick so a swap retunes the bed
+      const fill = clamp01(state.context.ctx / (CTX.contextCap ?? CTX.CONTEXT_TOKEN_CAP));
       if (bedLast < 0 || Math.abs(fill - bedLast) > 0.004) {
         bedLast = fill;
         bedMix.gain.setTargetAtTime(BED_LEVEL * bedScale * (0.4 + 0.6 * fill), now, 0.6);

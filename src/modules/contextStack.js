@@ -1,18 +1,23 @@
 // contextStack.js — THE STACK: the context window rendered as a tower of
 // hexagonal memory slabs at LAYOUT.towerPos.
 //
-//   · one slab ≈ 20k tokens; tower height = (ctx / CONTEXT_TOKEN_CAP) * towerMaxHeight
+//   · one slab ≈ 20k tokens; tower height = (ctx / cap) * towerMaxHeight, where
+//     cap is the PLAYING SESSION's ceiling (ctx.contextCap, falling back to
+//     ctx.CONTEXT_TOKEN_CAP) — a 200k-window Codex session fills the same shaft
+//     a 1M Claude session does, instead of reading as an empty plinth
 //   · slabs are matte near-black memory hardware — every visible photon is
 //     emissive: cyan circuit banding / memory-cell rows on cached slabs, hot
 //     magenta seams on the fresh crown, per-slab micro-flicker
 //   · epoch banding: each compaction opens a new epoch; the archive hue steps
 //     from ice-blue (oldest) toward warm teal (newest) so the session's five
 //     epochs read as strata in the stack
-//   · axis: a fixed world-space rail (twin hairlines + 50K ticks) with etched
-//     uppercase labels at 250K/500K/750K/1M CEILING, placed to stand clear of
-//     the tower silhouette and sized to read from the tower preset (cam2);
+//   · axis: a fixed world-space rail (twin hairlines + a 20-division tick
+//     ladder, majors on the quarters) with etched uppercase labels RE-DERIVED
+//     FROM THE CAP — 250K/500K/750K/1M CEILING on a 1M session,
+//     50K/100K/150K/200K CEILING on a 200k one — placed to stand clear of the
+//     tower silhouette and sized to read from the tower preset (cam2);
 //     hairline gridline rings tie each mark around the shaft
-//   · ceiling: the 1M cap is a hexagonal holo-frame (band, corner pylons,
+//   · ceiling: the cap is a hexagonal holo-frame (band, corner pylons,
 //     gridded plane) that ignites cyan → magenta as the summit approaches
 //   · seams: hot magenta gaskets in the slab gaps — the write span (fresh +
 //     cacheWrite: tokens written to the window this call) at full boost, then
@@ -66,6 +71,34 @@ function mulberry32(a) {
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const sstep = (x) => { const t = clamp01(x); return t * t * (3 - 2 * t); };
 const fmtTok = (v) => Math.round(v).toLocaleString('en-US');
+
+// The PLAYING session's context ceiling. ctx.contextCap is per-session (a Codex
+// session on a 200k window, a Claude one on 1M); CONTEXT_TOKEN_CAP is the
+// build-wide fallback for hosts that do not carry a per-session value. Read
+// through this everywhere, and RE-READ it in reset() — a swap changes the
+// ceiling, and a carried-over cap silently mis-scales the whole tower.
+const capOf = (ctx) => Math.max(1, ctx.contextCap ?? ctx.CONTEXT_TOKEN_CAP);
+
+// Axis label text for a token value: 250K, 1M, 1.5M, 50K. Labels are derived
+// from the cap, never hardcoded, so the ladder always names the real ceiling.
+const fmtAxis = (v) => {
+  if (v >= 1e6) { const m = v / 1e6; return (Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)) + 'M'; }
+  if (v >= 1000) { const k = v / 1000; return (Number.isInteger(k) ? k.toFixed(0) : k.toFixed(1)) + 'K'; }
+  return String(Math.round(v));
+};
+
+// Fractions of the cap the axis marks (and their gridline rings) sit at. The
+// tick ladder below runs 20 divisions, so majors land exactly on these.
+const MARK_FRACS = [0.25, 0.5, 0.75, 1.0];
+
+// Everything about the shaft that scales with the ceiling. One slab is always
+// SLAB_TOKENS of context, so a smaller cap means fewer, TALLER slabs filling
+// the same towerMaxHeight — the shaft reads full at the session's own ceiling.
+function towerMetrics(cap, LAYOUT) {
+  const slabs = cap / SLAB_TOKENS;
+  const STEP = LAYOUT.towerMaxHeight / slabs;
+  return { MAX_SLABS: Math.ceil(slabs) + 2, STEP, SLAB_H: STEP * 0.84 };
+}
 
 // Multiply the emissive term by the per-instance color so one instanced mesh
 // can hold epoch strata, hot fresh slabs, births and glitch spikes.
@@ -272,12 +305,14 @@ function scarTroughY(vt) {
 // set down with disposeTower() first.
 //
 // KEPT across a swap, deliberately: the canvas masks (S.sideTex/S.capTex and
-// the tick/beam/label textures baked into their materials — seeded, static,
-// byte-identical for every session), the group / pickGrp / follower rig, the 1M
-// holo-frame, the axis rail + label sprites, and the plinth. Every one of those
-// is sized from CONTEXT_TOKEN_CAP and LAYOUT, never from session data, so
-// rebuilding them would re-rasterize canvases and recompile shaders to produce
-// the same objects. The pick registration rides pickGrp, which stays attached
+// the tick/beam textures baked into their materials — seeded, static,
+// byte-identical for every session), the group / pickGrp / follower rig, the
+// ceiling holo-frame, the axis rail + label SPRITES, and the plinth. Every one
+// of those is sized as a FRACTION of LAYOUT.towerMaxHeight, never from session
+// data or the cap, so rebuilding them would re-rasterize canvases and recompile
+// shaders to produce the same objects. (The label sprites are kept but
+// re-etched: their text is the one cap-dependent thing on the axis, and
+// setAxisLabels repaints those four canvases in place.) The pick registration rides pickGrp, which stays attached
 // to ctx.scene — main.js's orphan prune leaves it alone and no re-register is
 // needed (the hover card closes over module-scope S, so it reads fresh numbers).
 function buildTower() {
@@ -362,22 +397,58 @@ function disposeTower() {
   S.slabMats = null; S.seamMat = null; S.shardMat = null;
 }
 
+// Re-scale the shaft to a (possibly new) ceiling. Called from reset() BEFORE
+// buildTower(), because MAX_SLABS is the instance count of the slab mesh and
+// SLAB_H is baked into its geometry. The per-slab pools are indexed by slab
+// number, so they are reallocated only when the slab count actually moves —
+// swapping between two sessions on the same window costs nothing.
+function resizeForCap(cap) {
+  const m = towerMetrics(cap, S.ctx.LAYOUT);
+  S.cap = cap;
+  S.STEP = m.STEP;
+  S.SLAB_H = m.SLAB_H;
+  if (m.MAX_SLABS !== S.MAX_SLABS) {
+    S.MAX_SLABS = m.MAX_SLABS;
+    S.birth = new Float32Array(m.MAX_SLABS).fill(-BIRTH_DUR);
+    S.epoch = new Uint8Array(m.MAX_SLABS);
+    S.hash = new Float32Array(m.MAX_SLABS);
+    for (let i = 0; i < m.MAX_SLABS; i++) S.hash[i] = S.rng();
+  }
+}
+
+// Re-etch the axis labels for a ceiling. Sprite POSITIONS are fractions of
+// towerMaxHeight and never move; only the text changes, so this repaints the
+// four canvases in place and disposes the textures it replaces. The topmost
+// mark carries the CEILING suffix and is the one update() tints with warn.
+function setAxisLabels(cap) {
+  for (let i = 0; i < S.labelMats.length; i++) {
+    const f = MARK_FRACS[i] ?? 1;
+    const text = fmtAxis(cap * f) + (f >= 1 ? ' CEILING' : '');
+    const mat = S.labelMats[i];
+    if (mat.userData.labelText === text) continue;
+    mat.userData.labelText = text;
+    mat.map?.dispose();
+    mat.map = makeLabelTexture(text);
+    mat.needsUpdate = true;
+  }
+}
+
 export default {
   name: 'contextStack',
 
   init(ctx) {
-    const { PALETTE, LAYOUT, CONTEXT_TOKEN_CAP } = ctx;
+    const { PALETTE, LAYOUT } = ctx;
     const texRng = mulberry32(0xC0FFEE);
 
-    const MAX_SLABS = Math.ceil(CONTEXT_TOKEN_CAP / SLAB_TOKENS) + 2;   // 52
-    const STEP = LAYOUT.towerMaxHeight / (CONTEXT_TOKEN_CAP / SLAB_TOKENS); // 0.52
-    const SLAB_H = STEP * 0.84;                                          // gap = magenta seam room
+    // The session's own ceiling, not the build-wide constant (see capOf).
+    const cap = capOf(ctx);
+    const { MAX_SLABS, STEP, SLAB_H } = towerMetrics(cap, LAYOUT);  // 52 / 0.52 on a 1M cap
     const R = LAYOUT.towerRadius;
 
     S = {
       ctx, rng: mulberry32(0x5EED),
       MAX_SLABS, STEP, SLAB_H, R,
-      maxH: LAYOUT.towerMaxHeight, cap: CONTEXT_TOKEN_CAP,
+      maxH: LAYOUT.towerMaxHeight, cap,
       time: 0, h: 0, prevN: 0, first: true,
       glitch: 0, collapse: 0, flash: 0, lastComp: -10,
       shardCursor: 0,
@@ -485,7 +556,9 @@ export default {
     S.topLight.position.y = 1.0;
     follow.add(S.topLight);
 
-    // --- the 1M ceiling: a faint hexagonal holo-frame the tower climbs toward.
+    // --- the ceiling: a faint hexagonal holo-frame the tower climbs toward.
+    // It sits at towerMaxHeight — the TOP OF THE SHAFT, whatever the cap is —
+    // so it needs no rescale on a swap; only the axis label naming it does.
     // Band + hairline edges + corner pylons + gridded cap plane; ignites
     // cyan → magenta as the summit closes in (warn, in update). Corners share
     // the slab hex azimuths so frame and tower read as one machined part.
@@ -536,8 +609,11 @@ export default {
     S.ceilPlane = ceilPlane;
 
     // --- axis: fixed world-space rail + gridline rings, sized for cam2 ---
-    // Twin vertical hairlines with a 50K tick ladder (majors every 250K) and
-    // etched labels. The rail direction is biased between the tower shot
+    // Twin vertical hairlines with a 20-division tick ladder (majors on the
+    // quarters, i.e. every cap/4) and etched labels whose TEXT is derived from
+    // the cap by setAxisLabels — the geometry below is fraction-of-height only,
+    // so it is identical for every ceiling and survives a session swap
+    // untouched. The rail direction is biased between the tower shot
     // (cam2 at world -40,13,14) and the origin so it stands clear of the
     // tower silhouette from cam2 and the ticks/labels run toward screen-right
     // over the void, not across the slab face.
@@ -564,7 +640,7 @@ export default {
     const railPts = [];
     railPts.push(rp(0, 0.55), rp(0, LAYOUT.towerMaxHeight + 0.11));         // main rail
     railPts.push(rp(-0.14, 0.55), rp(-0.14, LAYOUT.towerMaxHeight + 0.11)); // twin hairline
-    for (let k = 1; k <= 20; k++) {                            // 50K minors, 250K majors
+    for (let k = 1; k <= 20; k++) {                            // cap/20 minors, cap/4 majors
       const y = (k / 20) * LAYOUT.towerMaxHeight;
       railPts.push(rp(0, y), rp(k % 5 === 0 ? 0.62 : 0.26, y));
     }
@@ -574,15 +650,14 @@ export default {
     });
     axis.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(railPts), S.railMat));
     S.labelMats = [];
-    const MARKS = [[0.25, '250K'], [0.5, '500K'], [0.75, '750K'], [1.0, '1M CEILING']];
-    for (const [f, label] of MARKS) {
+    for (const f of MARK_FRACS) {
       if (f < 1) {                                            // hairline gridline ring
         const line = new THREE.LineLoop(ringGeo, S.axisMat);
         line.position.y = f * LAYOUT.towerMaxHeight;
         axis.add(line);
       }
       const sMat = new THREE.SpriteMaterial({
-        map: makeLabelTexture(label), color: PALETTE.cache, transparent: true,
+        map: null, color: PALETTE.cache, transparent: true,
         opacity: 0.8, depthWrite: false, fog: false,
       });
       const spr = new THREE.Sprite(sMat);
@@ -592,6 +667,7 @@ export default {
       axis.add(spr);
       S.labelMats.push(sMat);
     }
+    setAxisLabels(cap);   // etches the ladder for THIS session's ceiling
 
     // --- plinth grounding the tower ---
     const plinth = new THREE.Mesh(
@@ -636,7 +712,14 @@ export default {
   // already the new session when this runs, the frame loop is idled, and nothing
   // is drawn until it returns — so this is the one safe place to dispose.
   //
-  // Two jobs. (1) Rebuild the session-shaped meshes: disposeTower() then
+  // Three jobs. (0) RE-READ THE CEILING. ctx.contextCap is per-session, so a
+  // swap can move it (200k Codex → 1M Claude and back). Everything downstream
+  // of the cap is re-derived here: the slab metrics (resizeForCap — MAX_SLABS
+  // is the mesh's instance count and SLAB_H is baked into its geometry, so this
+  // MUST run before buildTower) and the axis label ladder (setAxisLabels).
+  // Carrying the old cap would leave the tower and its axis lying about the
+  // window the session actually ran in.
+  // (1) Rebuild the session-shaped meshes: disposeTower() then
   // buildTower(), which also re-zeroes every instance slot. That matters beyond
   // hygiene — the seam mesh draws all SEAM_MAX + SCAR_MAX instances every frame
   // and update() only zeroes a slot on the frame it goes dark, so the previous
@@ -652,6 +735,10 @@ export default {
   reset(ctx) {
     if (!S) return;             // init never completed — nothing to swap
     S.ctx = ctx;                // rebind rather than trust the captured ref
+
+    const cap = capOf(ctx);     // per-session ceiling — never the boot-time one
+    resizeForCap(cap);          // before buildTower: it reads MAX_SLABS / SLAB_H
+    setAxisLabels(cap);
 
     disposeTower();
     buildTower();
@@ -922,7 +1009,7 @@ export default {
 
     // --- summit rig: rings, beacon, light ---
     const fl = S.flash;
-    const warn = clamp01((fill - 0.86) / 0.12);                // near the 1M ceiling
+    const warn = clamp01((fill - 0.86) / 0.12);                // near the session's ceiling
     // rim rides vColor (which already carries dim/hover/birth), so the uniform
     // only breathes with ceiling-warn and compaction flash
     S.uRim.value = 0.55 + 0.3 * warn + 0.6 * fl;
@@ -939,7 +1026,7 @@ export default {
     S.topLight.color.copy(S.C_CACHE).lerp(S.C_HOT, fl);
     S.trimMat.opacity = (0.42 + 0.1 * Math.sin(now * 1.1) + 0.3 * fl) * dim;
 
-    // --- 1M holo-frame: faint at rest, ignites cyan → magenta as warn rises ---
+    // --- ceiling holo-frame: faint at rest, ignites cyan → magenta as warn rises ---
     const cp = 0.5 + 0.5 * Math.sin(now * 3.2);
     S.capMat.opacity = (0.09 + warn * (0.26 + 0.09 * cp) + fl * 0.28) * dim;
     S.capMat.color.copy(S.C_CACHE).lerp(S.C_FRESH, warn * 0.9).lerp(S.C_HOT, fl * 0.4);
@@ -951,14 +1038,15 @@ export default {
     S.ceilPlaneMat.color.copy(S.capMat.color);
     S.ceilPlane.rotation.z += dt * 0.06;                       // slow holo shimmer
 
-    // --- axis furniture: fixed, dim, precise; the 1M label ignites with warn ---
+    // --- axis furniture: fixed, dim, precise; the CEILING label (top mark,
+    // whatever the cap names it) ignites with warn ---
     S.axisMat.opacity = 0.26 * dim;
     S.railMat.opacity = 0.55 * dim;
     for (let i = 0; i < S.labelMats.length; i++) {
       S.labelMats[i].opacity = 0.8 * dim;
       S.labelMats[i].color.copy(S.C_CACHE);
     }
-    S.labelMats[3].color.lerp(S.C_FRESH, warn * 0.85);
+    S.labelMats[S.labelMats.length - 1]?.color.lerp(S.C_FRESH, warn * 0.85);
 
     // timers
     if (S.glitch > 0) S.glitch = Math.max(0, S.glitch - dt);

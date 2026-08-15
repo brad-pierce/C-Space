@@ -25,7 +25,8 @@
 //        events array, so a carried-over cursor indexes the wrong session.
 //   }
 // ctx = { THREE, scene, camera, renderer, session, timeline, PALETTE, CSS, LAYOUT,
-//         TOOL_COLORS, toolFamily, CHRONO, CONTEXT_TOKEN_CAP, params, quality,
+//         TOOL_COLORS, toolFamily, CHRONO, CONTEXT_TOKEN_CAP, contextCap,
+//         params, quality,
 //         playing — { mode: 'live'|'archive'|'attract', base, sessionId, project }
 //                   what is on screen and where it streams from (hud reads it;
 //                   attract.js is active only when mode === 'attract'),
@@ -45,6 +46,30 @@
 // STABLE across a swap (safe to capture once): ctx.scene, ctx.camera,
 // ctx.renderer, ctx.pick (and its entries Map), ctx.state, ctx.params, and every
 // palette/layout constant.
+//
+// CONTEXT CEILING — ctx.contextCap ------------------------------------------
+// The context window a session actually ran on, in tokens. Every module that
+// scales anything against "how full is the context" (contextStack's tower
+// height, hud's percentage readout, core intensity, chronogram context marks)
+// MUST read ctx.contextCap, falling back to ctx.CONTEXT_TOKEN_CAP when it is
+// absent:
+//     const cap = ctx.contextCap || ctx.CONTEXT_TOKEN_CAP;
+// WHY: CONTEXT_TOKEN_CAP is a single hardcoded 1M constant — the window the
+// flagship Claude session ran on. A Codex session on a ~200K window measured
+// against 1M reads as near-empty (its 113K peak renders as 11% of the tower)
+// when it was in fact context-heavy for its model. contextCapFor(session)
+// (src/lib/palette.js) derives the right ceiling from session.meta, so the
+// ceiling is SESSION-SHAPED, not a global.
+// main.js binds ctx.contextCap once at boot from the loaded session — that one
+// assignment covers every boot path, live included (a LiveTimeline's
+// session.meta is populated from the snapshot before ctx is built) — and
+// REBINDS it in swapSession in the same step that rebinds ctx.session /
+// ctx.timeline / ctx.playing.
+// CONSEQUENCE for module authors: ctx.contextCap is REBINDABLE exactly like
+// ctx.session. Never capture it into module-local state at init(); read it
+// through ctx at use time, and RE-READ it in reset() — a swap changes the
+// number, so a carried-over cap scales the new session against the old
+// session's window. ctx.CONTEXT_TOKEN_CAP stays on ctx purely as the fallback.
 //
 // INTERACTION CONTRACT:
 //   ctx.pick.register(object3D, spec) where spec = {
@@ -91,7 +116,9 @@
 //     3. carry transport state across the cut — timeline.speed (hud's rail) and
 //        timeline.playing (cameraRig's F freeze) — so a swap never silently
 //        un-freezes or resets playback speed
-//     4. rebind ctx.session / ctx.timeline / ctx.playing to the new objects
+//     4. rebind ctx.session / ctx.timeline / ctx.playing to the new objects, and
+//        recompute ctx.contextCap in the SAME step — the context ceiling is
+//        session-shaped, so it is part of the rebind, not a constant
 //     5. clear main.js-owned session-shaped state (ctx.state.filterTool — the
 //        old session's tool may not exist in the new one)
 //     6. call reset?.(ctx) on every active module, in MODULES order; a module
@@ -146,7 +173,7 @@
 // -----------------------------------------------------------------------------
 
 import * as THREE from 'three';
-import { PALETTE, CSS, LAYOUT, CONTEXT_TOKEN_CAP, TOOL_COLORS, toolFamily, CHRONO } from './lib/palette.js';
+import { PALETTE, CSS, LAYOUT, CONTEXT_TOKEN_CAP, contextCapFor, TOOL_COLORS, toolFamily, CHRONO } from './lib/palette.js';
 import { Timeline } from './lib/timeline.js';
 import { LiveTimeline } from './lib/liveTimeline.js';
 
@@ -448,6 +475,12 @@ async function boot() {
   const ctx = {
     THREE, scene, camera, renderer,
     session: initial.session, timeline: initial.timeline, playing: initial.playing,
+    // Per-session context ceiling (see CONTEXT CEILING in the header). Bound
+    // here, once, from whatever bootTimeline resolved — archive, attract, demo
+    // AND live all arrive as { session, ... }, and a LiveTimeline's session.meta
+    // is already filled from the snapshot by the time we get here, so this one
+    // assignment is the whole boot story. swapSession rebinds it.
+    contextCap: contextCapFor(initial.session),
     PALETTE, CSS, LAYOUT, CONTEXT_TOKEN_CAP, TOOL_COLORS, toolFamily, CHRONO,
     params, quality: params.get('q') ?? 'high',
     composerRender: null,
@@ -537,9 +570,14 @@ async function boot() {
 
       // 3. Rebind. From here on every ctx.timeline/ctx.session read is the new
       //    session — which is why modules must read through ctx, not a local.
+      //    ctx.contextCap moves WITH them: the context ceiling is a property of
+      //    the session's model, not a global, so a swap that rebound the session
+      //    but kept the old cap would scale the new tower against the wrong
+      //    window. Recomputed here, before any module reset() reads it.
       ctx.session = next.session;
       ctx.timeline = next.timeline;
       ctx.playing = next.playing;
+      ctx.contextCap = contextCapFor(next.session);
 
       // 4. main.js-owned session-shaped state. filterTool names a tool from the
       //    old session's ring that may not exist in the new one; the settle

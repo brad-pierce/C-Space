@@ -346,6 +346,9 @@ function injectLegendKey() {
   return true;
 }
 
+// -1 when the tool is unknown AND this session raised no OTHER bucket — which
+// happens live, where a tool can appear that the aggregate never saw. Callers
+// index arrays with the result, so they must skip negatives.
 function idxFor(tool) {
   const i = toolIndex.get(tool);
   return i === undefined ? otherIdx : i;
@@ -612,17 +615,25 @@ export default {
     const list = top.map(([name, v]) => ({
       name, count: numOf(v), errors: numOf(v, 'errors'), chars: numOf(v, 'chars'),
     }));
-    list.push({ name: 'OTHER', count: Math.max(otherCount, 1), errors: otherErrors, chars: otherChars });
+    // OTHER is the spill bucket for tools past TOP_N. Only raise it when
+    // something actually spilled: a session whose whole vocabulary fits in the
+    // ring (common outside Claude — Codex sessions run 2-11 distinct tools)
+    // was otherwise given a permanent amber monolith standing for nothing.
+    if (otherCount > 0) {
+      list.push({ name: 'OTHER', count: otherCount, errors: otherErrors, chars: otherChars });
+    }
 
     const N = list.length;                 // <= MAX_RING by construction
-    otherIdx = N - 1;
+    otherIdx = otherCount > 0 ? N - 1 : -1;   // -1 = no spill bucket this session
     toolIndex = new Map(top.map(([name], i) => [name, i]));
 
     // The outgoing session's filtered tool may not exist in the new ring.
     // main.js clears ctx.state.filterTool on every swap; re-check here so the
-    // module stays self-consistent whoever reset it. OTHER is always present.
+    // module stays self-consistent whoever reset it. OTHER is no longer
+    // guaranteed, so a carried-over OTHER filter has to clear with the rest.
     const ft = ctx.state.filterTool;
-    if (ft != null && ft !== 'OTHER' && !toolIndex.has(ft)) ctx.state.filterTool = null;
+    const stale = ft === 'OTHER' ? otherIdx < 0 : !toolIndex.has(ft);
+    if (ft != null && stale) ctx.state.filterTool = null;
 
     const maxCount = Math.max(1, list[0].count);
     const R = LAYOUT.totemRingRadius;
@@ -806,11 +817,13 @@ export default {
       const ev = fired[k];
       if (ev.kind === 'tool_call') {
         const i = idxFor(ev.tool);
+        if (i < 0) continue;               // unknown tool, no OTHER bucket
         spawnPulse(i, 1, accentCols[i], EVENT_LIFE, HEAD_BOOST,
           flood ? rng() * EVENT_LIFE * 0.7 : 0);
         capGlow[i] = 1;
       } else if (ev.kind === 'tool_result') {
         const i = idxFor(ev.tool);
+        if (i < 0) continue;               // unknown tool, no OTHER bucket
         const age0 = flood ? rng() * EVENT_LIFE * 0.7 : 0;
         if (ev.err) { spawnPulse(i, -1, COL.red, EVENT_LIFE, HEAD_BOOST + 0.2, age0); errFlick[i] = 1; }
         else spawnPulse(i, -1, accentCols[i], EVENT_LIFE, HEAD_BOOST, age0);

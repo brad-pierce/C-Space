@@ -5,8 +5,11 @@
 //   · IDENTITY (top-left)   — "THE FLEET" + "<n> SESSIONS // <m> LIVE" + tail source
 //   · REGISTER (right rail) — one compact row per roster session:
 //       live dot (pulsing cyan) or archive glyph (slate ◇) · project label ·
-//       60s event-rate sparkline (live rows) · current ctx tokens (live) or
-//       library peak ctx (archived; roster sizeMB dim when no library stats).
+//       60s event-rate sparkline (live rows) · harness tag on non-Claude rows ·
+//       current ctx tokens (live) or library peak ctx (archived; roster sizeMB
+//       dim when no library stats), each over THAT SESSION'S OWN context ceiling
+//       rather than a global 1M — the register exists to be compared down the
+//       column, and a fixed denominator makes cross-harness rows lie.
 //       Click: live → /?live=<id> · archived-with-library → /?session=<id> ·
 //       archived-without → / (the flagship — its file is /data/session.json).
 //   · VITALS (bottom-center) — EVENTS THIS VISIT (SSE arrivals after the
@@ -31,6 +34,10 @@
 // churns when values are unchanged. Import-clean under node (no top-level DOM).
 
 import { PALETTE as LIB_PALETTE, CSS as LIB_CSS } from '../lib/palette.js';
+// Namespace import on purpose: contextCapFor is landing in palette.js alongside
+// this work, and a named import of an export that is not there yet is a hard
+// link error. Read it off the namespace and degrade to the local banding below.
+import * as PAL from '../lib/palette.js';
 
 // ---- tunables ---------------------------------------------------------------
 const MAX_ROWS = 40;          // server roster caps at 40
@@ -43,6 +50,13 @@ const UI_HZ = 4;              // text/spark refresh rate
 const SPARK_W = 56, SPARK_H = 12, SPARK_DPR = 2;
 const SPARK_SECS = 60;        // sparkline window — one bucket per second
 const LABEL_MAX = 15;
+// Fallback context-window bands — MUST mirror palette.js's CONTEXT_BANDS /
+// CONTEXT_HEADROOM (see capFrom below for why the copy exists).
+const CAP_BANDS = [200_000, 500_000, 1_000_000, 2_000_000];
+const CAP_HEADROOM = 1.1;
+// Harness identity: full name for the identity line, 2-char tag for the rail.
+const SOURCE_LABEL = { claude: 'CLAUDE', codex: 'CODEX', hermes: 'HERMES', openclaw: 'OPENCLAW' };
+const SOURCE_TAG = { codex: 'CX', hermes: 'HM', openclaw: 'OC' };   // claude = the default, untagged
 
 // ---- pure helpers (module scope stays DOM-free) -----------------------------
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -74,6 +88,61 @@ function fmtTok(n) {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return String(Math.round(n));
 }
+
+// ---- per-session context ceiling (mirrors machines.js) ----------------------
+// A row's readout is only comparable to the row above it if both are measured
+// against their own window. Order of preference:
+//   1. an explicit ceiling the roster row or the library row supplies
+//   2. palette.js's contextCapFor — the model table plus its own peak banding
+//   3. the local banding below, if this build's palette predates that export
+function firstPositive(...cands) {
+  for (const c of cands) {
+    const n = Number(c);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// Smallest standard band clearing the peak with headroom — a straight copy of
+// palette.js's bandFor. See capFrom for why the copy exists.
+function bandCap(peak) {
+  const p = Number(peak);
+  if (!Number.isFinite(p) || p <= 0) return null;
+  const need = p * CAP_HEADROOM;
+  for (const b of CAP_BANDS) if (b >= need) return b;
+  return Math.max(CAP_BANDS[CAP_BANDS.length - 1], Math.ceil(need / 1_000_000) * 1_000_000);
+}
+
+// palette.js owns the real derivation; the fleet holds roster/library ROWS
+// rather than parsed sessions, so it hands contextCapFor a session-shaped
+// {meta} assembled from the row.
+// NOTE (duplication): bandCap mirrors that function's banding purely as a
+// fallback for a build where the export is absent — the same copy lives in
+// machines.js and fleetInteract.js, which keep their own row bags. If palette's
+// bands or headroom change, change them in all three (or drop the fallback).
+function capFrom(model, peak) {
+  const fn = PAL?.contextCapFor;
+  if (typeof fn === 'function') {
+    try {
+      const v = Number(fn({ meta: { model: model ?? undefined, peakContext: peak || undefined } }));
+      if (Number.isFinite(v) && v > 0) return v;
+    } catch { /* fall through to the local banding */ }
+  }
+  return bandCap(peak);
+}
+
+// 'codex' → 'CODEX'. Absent source stays null so nothing is invented.
+function sourceOf(row) {
+  const s = String(row?.source ?? row?.harness ?? row?.agent ?? row?.meta?.source ?? '')
+    .trim().toLowerCase();
+  return s || null;
+}
+// The adapter's own sourceLabel ('Claude Code', 'Codex CLI') wins when the row
+// carries one — the harness names itself better than a table here can.
+const sourceName = (row) => (row?.sourceLabel ? String(row.sourceLabel) : null);
+const sourceLabel = (s, raw) => (raw ? String(raw).toUpperCase().slice(0, 14)
+  : s ? SOURCE_LABEL[s] ?? s.toUpperCase().slice(0, 14) : null);
+const sourceTag = (s) => (!s || s === 'claude' ? '' : SOURCE_TAG[s] ?? s.toUpperCase().slice(0, 2));
 
 // ---- contract adapters (mirror machines.js exactly) -------------------------
 function rosterOf(ctx) {
@@ -110,6 +179,10 @@ function normalizeLibrary(payload) {
     map.set(String(id), {
       peak: r.peakContext ?? r.peakCtx ?? r.meta?.peakContext ?? null,
       toolCalls: r.toolCalls ?? r.meta?.toolCalls ?? null,
+      cap: firstPositive(r.contextCap, r.cap, r.contextWindow,
+        r.meta?.contextCap, r.meta?.contextWindow),
+      model: r.model ?? r.meta?.model ?? null,
+      source: sourceOf(r), srcName: sourceName(r),
     });
   }
   return map;
@@ -133,7 +206,8 @@ export default {
     this._rows = new Map();      // id → row record
     this._order = [];            // ids in display order
     this._orderKey = '';
-    this._lib = null;            // Map(id → {peak, toolCalls})
+    this._lib = null;            // Map(id → {peak, toolCalls, cap, model, source})
+    this._srcSuffix = '~/.CLAUDE/PROJECTS';   // replaced once discovery names sources
     this._agg = { events: 0, tools: 0 };
     this._aggEvStr = ''; this._aggToolStr = ''; this._aggStrStr = '';
     this._idStr = '';
@@ -224,8 +298,14 @@ export default {
 .fhud-row:not(.live) .fhud-lab{color:${C.hudDim};}
 .fhud-spark{flex:none;width:${SPARK_W}px;height:${SPARK_H}px;display:none;}
 .fhud-row.live .fhud-spark{display:block;}
-.fhud-val{flex:none;min-width:5.5ch;text-align:right;font-size:8.5px;color:${C.cache};
- text-shadow:0 0 5px ${C.cache}44;}
+/* harness tag — non-Claude rows only, amber so a mixed fleet is readable at a
+   glance without a legend; empty tag collapses to nothing (no reserved gap) */
+.fhud-src{flex:none;font-size:7px;letter-spacing:.1em;color:${C.output};opacity:.8;}
+.fhud-src:empty{display:none;}
+/* value carries tokens OVER the row's own ceiling — the denominator is the
+   whole point, so it gets width rather than a tooltip */
+.fhud-val{flex:none;min-width:9ch;text-align:right;font-size:8.5px;color:${C.cache};
+ white-space:nowrap;text-shadow:0 0 5px ${C.cache}44;}
 .fhud-row:not(.live) .fhud-val{color:${C.hudDim};text-shadow:none;}
 .fhud-more{height:17px;padding:2px 5px 0;font-size:7.5px;letter-spacing:.24em;color:${C.hudDim};display:none;}
 .fhud-empty{padding:4px 5px;font-size:8.5px;letter-spacing:.2em;color:${C.hudDim};}
@@ -269,7 +349,7 @@ export default {
     const title = div('fhud-title', idBox, 'THE FLEET');
     span('fhud-cursor', title, '_');
     this._idSub = div('fhud-sub', idBox, '— SESSIONS // — LIVE');
-    this._idSrc = div('fhud-sub2', idBox, tailLabel(ctx) + ' // ~/.CLAUDE/PROJECTS');
+    this._idSrc = div('fhud-sub2', idBox, tailLabel(ctx) + ' // ' + this._srcSuffix);
 
     // (2) session register — pooled rows, delegated click
     const rail = div('fhud-rail', root);
@@ -289,9 +369,10 @@ export default {
       spark.width = SPARK_W * SPARK_DPR;
       spark.height = SPARK_H * SPARK_DPR;
       row.appendChild(spark);
+      const src = span('fhud-src', row, '');
       const val = span('fhud-val', row, '—');
       list.appendChild(row);
-      this._pool.push({ row, dot, lab, spark, sctx: spark.getContext('2d'), val });
+      this._pool.push({ row, dot, lab, spark, sctx: spark.getContext('2d'), src, val });
     }
     this._moreEl = div('fhud-more', rail, '');
     list.addEventListener('click', (e) => {
@@ -333,10 +414,40 @@ export default {
     else location.assign('/');
   },
 
+  // Resolve (and ratchet) one row's context ceiling. Monotonic on the inferred
+  // path: a live row that grows past a band steps up and never back down, so a
+  // readout never rescales downward mid-stream. 0 means "still unknown".
+  _capOf(r) {
+    const lib = this._lib?.get(r.id);
+    const explicit = firstPositive(r.capHint, lib?.cap);
+    if (explicit) { r.cap = explicit; return r.cap; }
+    const peak = Math.max(r.peak || 0, r.ctxTok || 0, Number(lib?.peak) || 0);
+    r.peak = peak;
+    const model = r.model ?? lib?.model ?? null;
+    // nothing known at all → leave the ceiling unknown rather than invent one
+    const c = (peak > 0 || model) ? capFrom(model, peak) : null;
+    if (c && c > r.cap) r.cap = c;
+    return r.cap;
+  },
+
+  // Identity line's second half: the stores actually feeding the roster. Stays
+  // the Claude path until discovery reports something else, so a single-harness
+  // machine reads exactly as before.
+  _setSources(srcs) {
+    const known = [...srcs].filter(Boolean).sort();
+    const suffix = known.length && !(known.length === 1 && known[0] === 'claude')
+      ? known.map((s) => sourceLabel(s)).join(' + ')
+      : '~/.CLAUDE/PROJECTS';
+    if (suffix === this._srcSuffix) return;
+    this._srcSuffix = suffix;
+    if (!this._offline) this._idSrc.textContent = tailLabel(this._ctx) + ' // ' + suffix;
+  },
+
   // ---- roster ---------------------------------------------------------------
   _syncRoster(roster) {
     const n = Math.min(roster.length, MAX_ROWS);
     const order = [];
+    const srcs = new Set();
     let live = 0;
     for (let i = 0; i < n; i++) {
       const sess = roster[i];
@@ -347,6 +458,12 @@ export default {
         r = {
           id, label: projectLabel(sess.project),
           active: false, sizeMB: sess.sizeMB ?? null,
+          // harness identity + this row's own context ceiling (source arrives
+          // with the multi-harness discovery wiring; null means "not stated")
+          source: sourceOf(sess), srcName: sourceName(sess),
+          model: sess.model ?? sess.meta?.model ?? null,
+          capHint: firstPositive(sess.contextCap, sess.cap, sess.contextWindow, sess.meta?.contextCap),
+          cap: 0, peak: 0, srcStr: '', titleStr: '',
           ctxTok: 0, valStr: '', clsStr: '',
           lastLen: -1,                        // ctx-stream growth cursor
           buckets: new Float32Array(SPARK_SECS), bHead: 0, lastSec: this._t | 0,
@@ -356,11 +473,20 @@ export default {
         this._rows.set(id, r);
       }
       r.sizeMB = sess.sizeMB ?? r.sizeMB;
+      // discovery may start tagging harness / window fields mid-flight — adopt
+      // them, never unset what is already known
+      r.source = r.source ?? sourceOf(sess);
+      r.srcName = r.srcName ?? sourceName(sess);
+      r.model = r.model ?? sess.model ?? sess.meta?.model ?? null;
+      r.capHint = r.capHint ??
+        firstPositive(sess.contextCap, sess.cap, sess.contextWindow, sess.meta?.contextCap);
+      if (r.source) srcs.add(r.source);
       const wasActive = r.active;
       r.active = !!sess.active;
       if (r.active) live++;
       if (wasActive !== r.active) { r.valStr = ''; r.sparkDirty = true; }
     }
+    this._setSources(srcs);
 
     // bind pool slots in display order (server order: mtime desc, live on top)
     const key = order.join('|');
@@ -379,9 +505,8 @@ export default {
         r.ui = slot;
         slot.row.style.display = '';
         slot.row.dataset.id = id;
-        slot.row.title = r.label + ' · ' + id;
         if (slot.lab.textContent !== r.label) slot.lab.textContent = r.label;
-        r.valStr = ''; r.clsStr = ''; r.sparkDirty = true;
+        r.valStr = ''; r.clsStr = ''; r.srcStr = ''; r.titleStr = ''; r.sparkDirty = true;
       }
       const over = roster.length - n;
       this._moreEl.style.display = over > 0 ? 'block' : 'none';
@@ -413,7 +538,7 @@ export default {
     this._idSrc.className = 'fhud-sub2' + (off ? ' err' : '');
     this._idSrc.textContent = off
       ? tailLabel(this._ctx) + ' // OFFLINE — RETRY ' + SELF_POLL + 'S'
-      : tailLabel(this._ctx) + ' // ~/.CLAUDE/PROJECTS';
+      : tailLabel(this._ctx) + ' // ' + this._srcSuffix;
     if (off && !this._order.length) {
       this._emptyEl.style.display = '';
       this._emptyEl.className = 'fhud-empty err';
@@ -566,7 +691,7 @@ export default {
       const lbl = tailLabel(ctx);
       if (!this._offline && this._tailLbl !== lbl) {
         this._tailLbl = lbl;
-        this._idSrc.textContent = lbl + ' // ~/.CLAUDE/PROJECTS';
+        this._idSrc.textContent = lbl + ' // ' + this._srcSuffix;
       }
       let roster = rosterOf(ctx);
       if (roster) {
@@ -612,14 +737,33 @@ export default {
         r.ui.row.className = cls;
         r.ui.dot.textContent = r.active ? '●' : '◇';
       }
-      let val;
-      if (r.active) val = fmtTok(r.ctxTok);
-      else {
-        const peak = this._lib?.get(id)?.peak;
-        val = peak != null ? fmtTok(peak)
-          : r.sizeMB != null ? r.sizeMB.toFixed(1) + 'MB' : '—';
+      // tokens over this row's OWN ceiling. The sizeMB fallback is transcript
+      // mass, not context — it never gets a denominator dressed onto it.
+      const cap = this._capOf(r);
+      const lib = this._lib?.get(id);
+      const tok = r.active ? r.ctxTok : (lib?.peak ?? null);
+      let val, pct = null;
+      if (Number.isFinite(tok) && tok > 0) {
+        val = cap > 0 ? fmtTok(tok) + '/' + fmtTok(cap) : fmtTok(tok);
+        if (cap > 0) pct = Math.round(clamp01(tok / cap) * 100);
+      } else if (r.active) {
+        val = '—';
+      } else {
+        val = r.sizeMB != null ? r.sizeMB.toFixed(1) + 'MB' : '—';
       }
       if (val !== r.valStr) { r.valStr = val; r.ui.val.textContent = val; }
+
+      const src = r.source ?? lib?.source ?? null;
+      const tag = sourceTag(src);
+      if (tag !== r.srcStr) { r.srcStr = tag; r.ui.src.textContent = tag; }
+
+      // the tooltip carries what the 19px row cannot: full label, id, harness,
+      // and the percentage of the ceiling the value is measured against
+      const title = r.label + ' · ' + id +
+        (src ? ' · ' + sourceLabel(src, r.srcName ?? lib?.srcName) : '') +
+        (pct != null ? ` · ${val} (${pct}%)` : '');
+      if (title !== r.titleStr) { r.titleStr = title; r.ui.row.title = title; }
+
       if (r.active && r.sparkDirty) { r.sparkDirty = false; this._drawSpark(r); }
     }
 

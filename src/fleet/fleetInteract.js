@@ -11,8 +11,11 @@
 //     pools (pads, slabs, orbs) are pickable — activity rings and nameplates
 //     are additive chrome. Zero-scaled spare instances can never be struck.
 //   · HOVER — one corner-bracketed card in the main page's .pick-card
-//     language: project, id8, LIVE / IDLE / ARCHIVE, live ctx tokens or
-//     library peak, active agent count. Cursor turns pointer; the totem
+//     language: project, id8, the harness it ran on, LIVE / IDLE / ARCHIVE,
+//     live ctx tokens or library peak OVER THAT SESSION'S OWN context ceiling
+//     (never a global 1M — a 200k-window session read against 1M looks empty
+//     when it was in fact context-heavy), active agent count. Cursor turns
+//     pointer; the totem
 //     brightens via a soft additive glow sprite riding the hovered orb
 //     (self-owned, eased, whisper-level — nothing floats above silhouettes).
 //   · DIVE — click a totem (or wheel-zoom within ~8u of a live machine for
@@ -37,6 +40,10 @@
 
 import * as THREE from 'three';
 import { PALETTE as LIB_PALETTE, CSS as LIB_CSS } from '../lib/palette.js';
+// Namespace import on purpose: contextCapFor is landing in palette.js alongside
+// this work, and a named import of an export that is not there yet is a hard
+// link error. Read it off the namespace and degrade to the local banding below.
+import * as PAL from '../lib/palette.js';
 
 // ---- tunables ---------------------------------------------------------------
 const MAX_SLOTS = 48;          // mirror machines.js pool cap
@@ -60,6 +67,12 @@ const RAIL_EASE_DIVE = 10;     // 1/s marker pursuit while a dive is firing
 const GLOW_MAX = 0.32;         // hover glow opacity ceiling — marks whisper
 const GLOW_EASE = 10;          // 1/s glow opacity pursuit
 const LOOK_Y = 1.5;            // machine mid-height for distance measures
+// Fallback context-window bands — MUST mirror palette.js's CONTEXT_BANDS /
+// CONTEXT_HEADROOM (see capFrom below for why the copy exists).
+const CAP_BANDS = [200_000, 500_000, 1_000_000, 2_000_000];
+const CAP_HEADROOM = 1.1;
+const SOURCE_LABEL = { claude: 'CLAUDE', codex: 'CODEX', hermes: 'HERMES', openclaw: 'OPENCLAW' };
+const CARD_ROWS = 5;           // SESSION · HARNESS · STATUS · CONTEXT · AGENTS
 
 // ---- pure helpers (no DOM at module scope — import-clean under node) --------
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
@@ -84,6 +97,83 @@ function fmtTok(n) {
   if (n >= 1e4) return Math.round(n / 1e3) + 'K';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return String(Math.round(n));
+}
+
+// ---- per-session context ceiling (mirrors machines.js) ----------------------
+// The card must name the ruler it measured against, and the ruler is the
+// session's own window. Order of preference:
+//   1. an explicit ceiling the roster row or the library row supplies
+//   2. palette.js's contextCapFor — the model table plus its own peak banding
+//   3. the local banding below, if this build's palette predates that export
+function firstPositive(...cands) {
+  for (const c of cands) {
+    const n = Number(c);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// Smallest standard band clearing the peak with headroom — a straight copy of
+// palette.js's bandFor. See capFrom for why the copy exists.
+function bandCap(peak) {
+  const p = Number(peak);
+  if (!Number.isFinite(p) || p <= 0) return null;
+  const need = p * CAP_HEADROOM;
+  for (const b of CAP_BANDS) if (b >= need) return b;
+  return Math.max(CAP_BANDS[CAP_BANDS.length - 1], Math.ceil(need / 1_000_000) * 1_000_000);
+}
+
+// palette.js owns the real derivation; the fleet holds roster/library ROWS
+// rather than parsed sessions, so it hands contextCapFor a session-shaped
+// {meta} assembled from the row.
+// NOTE (duplication): bandCap mirrors that function's banding purely as a
+// fallback for a build where the export is absent — the same copy lives in
+// machines.js and fleetHud.js, which keep their own row bags. If palette's
+// bands or headroom change, change them in all three (or drop the fallback).
+function capFrom(model, peak) {
+  const fn = PAL?.contextCapFor;
+  if (typeof fn === 'function') {
+    try {
+      const v = Number(fn({ meta: { model: model ?? undefined, peakContext: peak || undefined } }));
+      if (Number.isFinite(v) && v > 0) return v;
+    } catch { /* fall through to the local banding */ }
+  }
+  return bandCap(peak);
+}
+
+// Resolve (and ratchet) a record's ceiling. Monotonic on the inferred path so
+// the card's denominator never shrinks mid-stream. 0 means "still unknown".
+function capOf(rec, liveTok) {
+  const lib = S.lib?.get(rec.id);
+  const explicit = firstPositive(rec.capHint, lib?.cap);
+  if (explicit) { rec.cap = explicit; return rec.cap; }
+  const peak = Math.max(rec.peak || 0, Number(liveTok) || 0, Number(lib?.peak) || 0);
+  rec.peak = peak;
+  const model = rec.model ?? lib?.model ?? null;
+  // nothing known at all → leave the ceiling unknown rather than invent one
+  const c = (peak > 0 || model) ? capFrom(model, peak) : null;
+  if (c && c > rec.cap) rec.cap = c;
+  return rec.cap;
+}
+
+// 'codex' → 'CODEX'. Absent source stays null so nothing is invented.
+function sourceOf(row) {
+  const s = String(row?.source ?? row?.harness ?? row?.agent ?? row?.meta?.source ?? '')
+    .trim().toLowerCase();
+  return s || null;
+}
+// The adapter's own sourceLabel ('Claude Code', 'Codex CLI') wins when the row
+// carries one — the harness names itself better than a table here can.
+const sourceName = (row) => (row?.sourceLabel ? String(row.sourceLabel) : null);
+const sourceLabel = (s, raw) => (raw ? String(raw).toUpperCase().slice(0, 14)
+  : s ? SOURCE_LABEL[s] ?? s.toUpperCase().slice(0, 14) : null);
+
+// tokens over the ceiling, with the percentage that only means something once
+// the denominator is on screen beside it
+function fmtCtx(tok, cap) {
+  if (!Number.isFinite(tok) || tok <= 0) return '—';
+  if (!(cap > 0)) return fmtTok(tok);
+  return `${fmtTok(tok)} / ${fmtTok(cap)} · ${Math.round(clamp(tok / cap, 0, 1) * 100)}%`;
 }
 
 // ---- contract adapters (mirror machines.js exactly) -------------------------
@@ -121,7 +211,8 @@ function timelineOf(ctx, id) {
   return null;
 }
 
-// /data/library/index.json → Map(id → {peak}). Presence keys dive routing.
+// /data/library/index.json → Map(id → {peak, cap, model, source}). Presence
+// keys dive routing; the rest feeds the card's ceiling and harness rows.
 function normLib(payload) {
   const map = new Map();
   const rows = Array.isArray(payload) ? payload
@@ -133,7 +224,13 @@ function normLib(payload) {
     if (!r) continue;
     const id = r.id ?? r.session ?? r.sessionId;
     if (!id) continue;
-    map.set(String(id), { peak: r.peakContext ?? r.peakCtx ?? r.meta?.peakContext ?? null });
+    map.set(String(id), {
+      peak: r.peakContext ?? r.peakCtx ?? r.meta?.peakContext ?? null,
+      cap: firstPositive(r.contextCap, r.cap, r.contextWindow,
+        r.meta?.contextCap, r.meta?.contextWindow),
+      model: r.model ?? r.meta?.model ?? null,
+      source: sourceOf(r), srcName: sourceName(r),
+    });
   }
   return map;
 }
@@ -174,6 +271,12 @@ function syncRoster(ctx) {
         sizeMB: Number.isFinite(sess.sizeMB) ? sess.sizeMB : null,
         lastLen: -1,         // stream growth cursor (backlog primes silently)
         lastGrow: -1e9,      // s — last observed live arrival (IDLE until one)
+        // harness identity + this session's own context ceiling (source lands
+        // with the multi-harness discovery wiring; null = not stated)
+        source: sourceOf(sess), srcName: sourceName(sess),
+        model: sess.model ?? sess.meta?.model ?? null,
+        capHint: firstPositive(sess.contextCap, sess.cap, sess.contextWindow, sess.meta?.contextCap),
+        cap: 0, peak: 0,
       };
       S.order.push(rec);
       S.byId.set(id, rec);
@@ -181,6 +284,12 @@ function syncRoster(ctx) {
       rec.active = !!sess.active;
       rec.mtime = Number(sess.mtime) || rec.mtime;
       if (Number.isFinite(sess.sizeMB)) rec.sizeMB = sess.sizeMB;
+      // adopt harness / window fields if discovery starts sending them later
+      rec.source = rec.source ?? sourceOf(sess);
+      rec.srcName = rec.srcName ?? sourceName(sess);
+      rec.model = rec.model ?? sess.model ?? sess.meta?.model ?? null;
+      rec.capHint = rec.capHint ??
+        firstPositive(sess.contextCap, sess.cap, sess.contextWindow, sess.meta?.contextCap);
     }
   }
 }
@@ -255,21 +364,28 @@ function fillCard(ctx, rec) {
   const st = statusOf(rec);
   if (S.titleEl.textContent !== rec.label) { S.titleEl.textContent = rec.label; S.cardDirty = true; }
   setRow(0, 'SESSION', rec.id8.toUpperCase(), '');
-  setRow(1, 'STATUS', st, st === 'LIVE' ? 'live' : 'dim');
+  // harness row appears only once a source is actually known — a fleet of
+  // Claude-only rows that predate discovery wiring shows the card as before
+  const libRow = S.lib?.get(rec.id);
+  const src = sourceLabel(rec.source ?? libRow?.source, rec.srcName ?? libRow?.srcName);
+  setRow(1, src ? 'HARNESS' : null, src, 'dim');
+  setRow(2, 'STATUS', st, st === 'LIVE' ? 'live' : 'dim');
   if (rec.active) {
     const tl = timelineOf(ctx, rec.id);
     const cx = tl ? tl.contextAt(tl.duration) : null;
-    setRow(2, 'CONTEXT', cx ? fmtTok(cx.ctx || 0) : '—', '');
+    const tok = cx ? (cx.ctx || 0) : 0;
+    setRow(3, 'CONTEXT', fmtCtx(tok, capOf(rec, tok)), '');
     let agents = 0;
     if (tl) for (const sa of tl.subagents) if (sa.endVt > tl.duration) agents++;
-    setRow(3, 'AGENTS', String(agents), agents > 0 ? 'live' : '');
+    setRow(4, 'AGENTS', String(agents), agents > 0 ? 'live' : '');
   } else {
-    // label stays honest: library peak is context tokens; the fallback is
-    // transcript mass off the roster, never dressed up as a token count
+    // label stays honest: library peak is context tokens measured against that
+    // session's own window; the fallback is transcript mass off the roster,
+    // never dressed up as a token count and never given a denominator
     const peak = S.lib?.get(rec.id)?.peak;
-    if (peak != null) setRow(2, 'PEAK CTX', fmtTok(peak), 'dim');
-    else setRow(2, 'TRANSCRIPT', rec.sizeMB != null ? rec.sizeMB.toFixed(1) + 'MB' : '—', 'dim');
-    setRow(3, null);
+    if (peak != null) setRow(3, 'PEAK CTX', fmtCtx(peak, capOf(rec)), 'dim');
+    else setRow(3, 'TRANSCRIPT', rec.sizeMB != null ? rec.sizeMB.toFixed(1) + 'MB' : '—', 'dim');
+    setRow(4, null);
   }
   // re-measure only when a content write actually fired (no per-frame reflow)
   if (S.cardDirty || !S.cw) {
@@ -438,7 +554,7 @@ function buildCard(ctx) {
   rows.className = 'fzi-rows';
   body.appendChild(rows);
   S.rowPool = [];
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < CARD_ROWS; i++) {
     const k = document.createElement('div');
     k.className = 'fzi-k';
     const v = document.createElement('div');

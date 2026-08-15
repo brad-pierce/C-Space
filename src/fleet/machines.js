@@ -16,8 +16,11 @@
 // Totem anatomy:
 //   · CORE ORB — session identity (state = hue + motion, see above).
 //   · CONTEXT COLUMN — slab-banded stack under the orb, height = live ctx (or
-//     frozen/peak ctx) / 1M cap, same cyan-cache / magenta-fresh language
-//     as the main tower. Live columns track the stream every frame.
+//     frozen/peak ctx) / THAT SESSION'S OWN context ceiling, same cyan-cache /
+//     magenta-fresh language as the main tower. Live columns track the stream
+//     every frame. The ceiling is per-machine, never a global 1M: the district's
+//     whole job is comparison, and a fixed denominator would draw a context-
+//     heavy 200k-window Codex session as a permanent stub beside a 1M Claude one.
 //   · ACTIVITY RING — thin arc on the plot pad. Live: arc fill = last-30s event
 //     rate (1 ev/s sustained = full ring, 12 o'clock start, clockwise, matching
 //     the chronogram convention) + a hot tick flash on the leading segment per
@@ -40,11 +43,15 @@
 // adapter that accepts the documented shapes and degrades gracefully.
 
 import * as THREE from 'three';
+// Namespace import on purpose: contextCapFor is landing in palette.js alongside
+// this work, and a named import of an export that is not there yet is a hard
+// link error. Read it off the namespace and degrade to the local banding below.
+import * as PAL from '../lib/palette.js';
 
 // ---- tunables ---------------------------------------------------------------
 const MAX_MACHINES = 48;      // pool cap (server roster caps at 40)
-const SLABS_PER = 24;         // slab pool per machine — 1M/24 ≈ 41.7k tok/slab
-const COL_MAX_H = 3.3;        // column height at the 1M token cap
+const SLABS_PER = 24;         // slab pool per machine — cap/24 tokens per slab
+const COL_MAX_H = 3.3;        // column height at the machine's own context cap
 const STEP = COL_MAX_H / SLABS_PER;
 const SLAB_H = STEP * 0.8;    // inter-slab gap = seam room
 const COL_R = 0.4;
@@ -59,6 +66,12 @@ const EMBER_MS = 3_600_000;   // idle-but-recent horizon: mtime < 1h → ember
 const BREATH_W = Math.PI / 2; // eased breath angular speed — one cycle ≈ 4s
 const ATLAS_W = 512, ATLAS_H = 1024, CELL_W = 256, CELL_H = 40;
 const PLATE_W = 2.1, PLATE_H = PLATE_W * (CELL_H / CELL_W);
+// Fallback context-window bands — MUST mirror palette.js's CONTEXT_BANDS /
+// CONTEXT_HEADROOM (see capFrom below for why the copy exists).
+const CAP_BANDS = [200_000, 500_000, 1_000_000, 2_000_000];
+const CAP_HEADROOM = 1.1;
+// Harness display names for the source tag ('claude'|'codex'|'hermes'|'openclaw').
+const SOURCE_LABEL = { claude: 'CLAUDE', codex: 'CODEX', hermes: 'HERMES', openclaw: 'OPENCLAW' };
 
 // ---- pure helpers (no DOM at module scope — import-clean under node) --------
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -73,6 +86,67 @@ function stateFor(sess, nowMs) {
   if (sess.active) return 'live';
   const mt = Number(sess.mtime);
   return Number.isFinite(mt) && nowMs - mt < EMBER_MS ? 'ember' : 'archive';
+}
+
+// ---- per-session context ceiling -------------------------------------------
+// Every column is measured against ITS OWN window. Order of preference:
+//   1. an explicit ceiling the roster row or the library row supplies
+//   2. palette.js's contextCapFor — the model table plus its own peak banding
+//   3. the local banding below, if this build's palette predates that export
+function firstPositive(...cands) {
+  for (const c of cands) {
+    const n = Number(c);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// Smallest standard band clearing the peak with headroom — a straight copy of
+// palette.js's bandFor. See capFrom for why the copy exists.
+function bandCap(peak) {
+  const p = Number(peak);
+  if (!Number.isFinite(p) || p <= 0) return null;
+  const need = p * CAP_HEADROOM;
+  for (const b of CAP_BANDS) if (b >= need) return b;
+  return Math.max(CAP_BANDS[CAP_BANDS.length - 1], Math.ceil(need / 1_000_000) * 1_000_000);
+}
+
+// palette.js owns the real derivation (model table + explicit-cap keys + peak
+// banding). The fleet holds roster/library ROWS rather than parsed sessions, so
+// it hands contextCapFor a session-shaped {meta} assembled from the row.
+// NOTE (duplication): bandCap above mirrors that function's banding purely as a
+// fallback for a build where the export is absent. If palette's bands or
+// headroom change, change them here too — or delete the fallback outright once
+// the export is guaranteed. Same copy lives in fleetHud.js / fleetInteract.js,
+// which keep their own row bags.
+function capFrom(model, peak) {
+  const fn = PAL?.contextCapFor;
+  if (typeof fn === 'function') {
+    try {
+      const v = Number(fn({ meta: { model: model ?? undefined, peakContext: peak || undefined } }));
+      if (Number.isFinite(v) && v > 0) return v;
+    } catch { /* fall through to the local banding */ }
+  }
+  return bandCap(peak);
+}
+
+// 'codex' → 'CODEX'. Unknown/absent source stays null so nothing is invented.
+function sourceOf(row) {
+  const s = String(row?.source ?? row?.harness ?? row?.agent ?? row?.meta?.source ?? '')
+    .trim().toLowerCase();
+  return s || null;
+}
+// The adapter's own sourceLabel ('Claude Code', 'Codex CLI') wins when the row
+// carries one — the harness names itself better than a table here can.
+const sourceName = (row) => (row?.sourceLabel ? String(row.sourceLabel) : null);
+const sourceLabel = (s, raw) => (raw ? String(raw).toUpperCase().slice(0, 14)
+  : s ? SOURCE_LABEL[s] ?? s.toUpperCase().slice(0, 14) : null);
+
+function fmtK(n) {
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 2) + 'M';
+  if (n >= 1e3) return Math.round(n / 1e3) + 'K';
+  return String(Math.round(n));
 }
 
 function mulberry32(a) {
@@ -160,6 +234,10 @@ function normalizeLibrary(payload) {
     map.set(String(id), {
       peak: r.peakContext ?? r.peakCtx ?? r.meta?.peakContext ?? null,
       toolCalls: Number.isFinite(toolCalls) ? toolCalls : null,
+      cap: firstPositive(r.contextCap, r.cap, r.contextWindow,
+        r.meta?.contextCap, r.meta?.contextWindow),
+      model: r.model ?? r.meta?.model ?? null,
+      source: sourceOf(r), srcName: sourceName(r),
     });
   }
   return map;
@@ -277,6 +355,27 @@ function countRate(m, now) {   // events inside the RATE_WINDOW, newest-first sc
   return n;
 }
 
+// Resolve (and ratchet) one machine's context ceiling. Monotonic on the inferred
+// path: a live session that grows past a band steps up to the next one and never
+// back down, so a column never rescales downward mid-stream (and a compaction
+// drops the height, not the ruler). m.cap === 0 means "still unknown".
+function refreshCap(m, liveTok) {
+  const lib = S.library?.get(m.id);
+  const explicit = firstPositive(m.capHint, lib?.cap);
+  if (explicit) { m.cap = explicit; return m.cap; }
+  const peak = Math.max(m.peak || 0, Number(liveTok) || 0, Number(lib?.peak) || 0);
+  m.peak = peak;
+  const model = m.model ?? lib?.model ?? null;
+  // nothing known at all → leave the ceiling unknown rather than invent one
+  const c = (peak > 0 || model) ? capFrom(model, peak) : null;
+  if (c && c > m.cap) m.cap = c;
+  return m.cap;
+}
+
+// Divisor for geometry — never zero. An unknown ceiling only ever applies to a
+// machine with no context reading at all, whose column is a stub either way.
+const capUnit = (m) => m.cap || S.defaultCap;
+
 // Write one machine's column slabs. Live: cyan cache body + magenta fresh crown
 // + per-slab hash shimmer. Ember: warm, dim, still. Archived: cool, dim, still.
 function writeColumn(m, cx, liveNow) {
@@ -284,7 +383,7 @@ function writeColumn(m, cx, liveNow) {
   const base = m.slot * SLABS_PER;
   const n = m.h > 0.02 ? Math.min(SLABS_PER, Math.max(1, Math.ceil(m.h / STEP))) : 0;
   const freshTok = cx ? (cx.fresh || 0) + (cx.cacheWrite || 0) : 0;
-  const freshStart = m.h - (freshTok / S.cap) * COL_MAX_H;
+  const freshStart = m.h - (freshTok / capUnit(m)) * COL_MAX_H;
   for (let i = 0; i < SLABS_PER; i++) {
     if (i >= n) { slabs.setMatrixAt(base + i, S.zeroMat); continue; }
     const isTop = i === n - 1;
@@ -380,7 +479,8 @@ function writePadBase(m) {
 // re-written when the library loads) — still by construction, zero frame cost.
 function styleArchive(m) {
   const lib = S.library?.get(m.id);
-  m.h = lib?.peak ? clamp01(lib.peak / S.cap) * COL_MAX_H : 0.06;
+  refreshCap(m);
+  m.h = lib?.peak ? clamp01(lib.peak / capUnit(m)) * COL_MAX_H : 0.06;
   writeColumn(m, null, null);
   writeOrb(m, null);
   const tc = lib?.toolCalls;
@@ -393,7 +493,8 @@ function styleArchive(m) {
 // last live height when we watched it work; falls back to library peak.
 function styleEmber(m) {
   const lib = S.library?.get(m.id);
-  if (m.h <= 0.02) m.h = lib?.peak ? clamp01(lib.peak / S.cap) * COL_MAX_H : 0.06;
+  refreshCap(m);
+  if (m.h <= 0.02) m.h = lib?.peak ? clamp01(lib.peak / capUnit(m)) * COL_MAX_H : 0.06;
   writeColumn(m, null, null);
   writeOrb(m, null);
   const tc = lib?.toolCalls;
@@ -426,7 +527,14 @@ function addMachine(sess, i, nowMs) {
     x: 0, y: 0, z: 0, phase: S.rng() * Math.PI * 2,
     h: 0, flare: 0, tickF: 0, fill: 0, snapped: false,
     evT: new Float32Array(EVBUF), evHead: 0, evN: 0, lastEv: -1,
+    // harness identity + per-session context ceiling (source lands with the
+    // multi-harness discovery wiring; absent means "not stated", never "claude")
+    source: sourceOf(sess), srcName: sourceName(sess),
+    model: sess.model ?? sess.meta?.model ?? null,
+    capHint: firstPositive(sess.contextCap, sess.cap, sess.contextWindow, sess.meta?.contextCap),
+    cap: 0, peak: 0,
   };
+  refreshCap(m);
   slotOf(S.ctx, i, S.tmpPos);
   m.x = S.tmpPos.x; m.y = S.tmpPos.y; m.z = S.tmpPos.z;
 
@@ -462,8 +570,14 @@ function buildFromRoster(roster) {
   for (let i = 0; i < n; i++) addMachine(roster[i], i, nowMs);
   S.built = true;
   let live = 0, ember = 0;
-  for (const m of S.machines) { if (m.state === 'live') live++; else if (m.state === 'ember') ember++; }
-  console.log(`[fleet/machines] ${S.machines.length} machine totems (${live} live, ${ember} ember) — 5 instanced draws, col cap ${COL_MAX_H} @ 1M tokens`);
+  const srcs = new Set();
+  for (const m of S.machines) {
+    if (m.state === 'live') live++; else if (m.state === 'ember') ember++;
+    if (m.source) srcs.add(m.source);
+  }
+  console.log(`[fleet/machines] ${S.machines.length} machine totems (${live} live, ${ember} ember` +
+    (srcs.size ? `; ${[...srcs].join('+')}` : '') +
+    `) — 5 instanced draws, col ${COL_MAX_H}u at each session's own context ceiling`);
 }
 
 function syncRoster(roster) {
@@ -475,6 +589,13 @@ function syncRoster(roster) {
     const m = S.byId.get(String(sess.id));
     if (m) {
       m.mtime = Number(sess.mtime) || m.mtime;
+      // discovery may start tagging harness / window fields after the district
+      // is already standing — adopt them, never unset what we already have
+      m.source = m.source ?? sourceOf(sess);
+      m.srcName = m.srcName ?? sourceName(sess);
+      m.model = m.model ?? sess.model ?? sess.meta?.model ?? null;
+      m.capHint = m.capHint ??
+        firstPositive(sess.contextCap, sess.cap, sess.contextWindow, sess.meta?.contextCap);
       const st = stateFor(sess, nowMs);
       if (st !== m.state) { m.state = st; applyState(m); }
     } else if (S.machines.length < MAX_MACHINES) {
@@ -488,7 +609,9 @@ export default {
 
   init(ctx) {
     S = {
-      ctx, cap: ctx.CONTEXT_TOKEN_CAP ?? 1_000_000,
+      // last-resort divisor only: every machine carries its OWN ceiling (m.cap),
+      // and this is used solely for a machine with no context reading at all
+      ctx, defaultCap: ctx.CONTEXT_TOKEN_CAP ?? 1_000_000,
       rng: mulberry32(0xF1EE7),
       machines: [], byId: new Map(), built: false,
       library: null, libDirty: false,
@@ -601,11 +724,16 @@ export default {
         const m = S.machines[slot];
         if (!m) return { title: 'MACHINE', lines: [] };
         const lib = S.library?.get(m.id);
+        const cap = capUnit(m);
+        const frac = m.h / COL_MAX_H;
         const lines = [
           ['SESSION', m.id8.toUpperCase()],
           ['STATUS', m.state === 'live' ? 'LIVE' : m.state === 'ember' ? 'EMBER' : 'ARCHIVED'],
-          ['CONTEXT', `${Math.round((m.h / COL_MAX_H) * S.cap / 1000).toLocaleString('en-US')}K · ${((m.h / COL_MAX_H) * 100).toFixed(0)}%`],
+          // the ceiling is named, not implied — the % is meaningless without it
+          ['CONTEXT', `${fmtK(frac * cap)} / ${fmtK(cap)} · ${(frac * 100).toFixed(0)}%`],
         ];
+        const src = sourceLabel(m.source ?? lib?.source, m.srcName ?? lib?.srcName);
+        if (src) lines.splice(1, 0, ['HARNESS', src]);
         if (m.state === 'live') lines.push(['RATE', `${countRate(m, S.time)} EV / ${RATE_WINDOW}S`]);
         else if (lib?.toolCalls != null) lines.push(['CALLS', lib.toolCalls.toLocaleString('en-US')]);
         return { title: m.label, lines };
@@ -665,9 +793,11 @@ export default {
         cx = tl.contextAt(tl.duration);
       }
 
-      // column height chases live context (snap on first sample)
+      // column height chases live context (snap on first sample), scaled against
+      // this machine's own ceiling — which ratchets up if the stream outgrows it
       const ctxTok = cx ? (cx.ctx || 0) : (S.library?.get(m.id)?.peak ?? 0);
-      const target = clamp01(ctxTok / S.cap) * COL_MAX_H;
+      refreshCap(m, ctxTok);
+      const target = clamp01(ctxTok / capUnit(m)) * COL_MAX_H;
       if (!m.snapped && cx) { m.h = target; m.snapped = true; }
       else m.h += (target - m.h) * Math.min(1, dt * 3.5);
 

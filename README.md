@@ -15,16 +15,17 @@ above and in the video is the bundled synthetic demo session (`npm run dev`, the
 committed at [`docs/video/cspace-demo.mp4`](docs/video/cspace-demo.mp4).</sub>
 
 **C-Space renders an AI coding-agent session as a place.** It reads session
-transcripts **from your own machine** — Claude Code's `~/.claude/projects` is the
-wired path today, with read-only adapters for Codex, Hermes and OpenClaw in
-`tools/adapters/` (see **Status**) — and plays one back as a neon-noir
+transcripts **from your own machine** — Claude Code's `~/.claude/projects`, plus
+Codex, Hermes and OpenClaw through read-only adapters you opt in per source
+(see **Harnesses**) — and plays one back as a neon-noir
 machine-city. **If you have no sessions on this machine (or have not opted any
 project in yet, which is the default), a bundled SYNTHETIC demo session plays
 instead** — so the quickstart below works immediately, with zero setup and
 nothing of yours on screen.
 
 In the city: the agent loop is a gyroscope reactor at the origin, the context
-window is a tower of memory slabs growing toward a 1M-token ceiling, each tool
+window is a tower of memory slabs growing toward that model's own token ceiling
+(a 200k-window session is measured against 200k, not against Claude's 1M), each tool
 is a monolith on a ring with light-pulses for calls and results, subagents are
 violet drones tethered to the core, and the whole session maps onto a radial
 chronogram on the floor — click it to seek. It runs in two modes: **archive** (a
@@ -247,14 +248,21 @@ the Claude adapter, loads the others when their files are present, and
 with each row tagged by source — one adapter throwing on a corrupt store does
 not sink the others.
 
-One caveat, because the section above reads more finished than it is: the
-registry is a library with tests, **not yet wired into the app's discovery
-path**. `npm run live` and `npm run build-library` still enumerate
-`~/.claude/projects` directly, so a Codex/Hermes/OpenClaw session does not
-appear in the library panel on its own today — you reach those stores through
-`tools/adapters/` (`discoverAll()` / `getAdapter(id).parse(entry)`) and write the
-result into the data store yourself. Wiring the registry into `listSessions()`
-is the obvious next commit.
+The registry **is** the discovery path: `npm run live` and `npm run build-library`
+both enumerate through it, so a Codex session appears in the library panel and
+the fleet district beside your Claude ones. Two things bound that, by design:
+
+- **Presence is not consent.** A source with no entry in the allowlist's
+  `sources` map is never opened at all — having `~/.codex` on the machine
+  exposes nothing. A config written before that key existed keeps behaving
+  exactly as it did: your Claude projects, and zero of everything else. See
+  [Privacy](#privacy-the-project-allowlist).
+- **Only Claude sessions tail live.** The SSE tail is an incremental Claude
+  JSONL reader; every other source is archive-only. Those rows are marked
+  `"streamable": false`, `/stream` refuses them with a 501 that names the
+  archive path rather than hanging or returning an empty stream, and they reach
+  the screen through `npm run build-library`. Their library ids are namespaced
+  (`codex-<id>`) so free-form ids from different stores cannot collide.
 
 Every adapter is strictly **read-only** with respect to the store it reads.
 SQLite-backed adapters use the built-in `node:sqlite` (Node ≥ 22.5,
@@ -369,13 +377,18 @@ A personal project, published because it was fun to build, not because it is a
 product. Expect rough edges and read the code before running it anywhere that
 matters. Concretely:
 
-- **Claude Code and Codex adapters are verified against real local data.**
-  **Hermes and OpenClaw are built to published schemas and have never been run
-  against a live install** — they read fields through name-coalescing fallbacks
-  and mark guesses `needs-real-data` in comments. Treat them as informed
-  sketches; if you have one of those stores, the adapter is where to look first.
-- The adapter registry is not yet wired into session discovery (see the caveat
-  in **Harnesses**) — the app's own discovery path is Claude-only today.
+- **Claude Code and Codex adapters are verified against real local data** —
+  Codex end-to-end, from rollout file to rendered city. **Hermes and OpenClaw
+  are built to published schemas and have never been run against a live
+  install** — they read fields through name-coalescing fallbacks and mark
+  guesses `needs-real-data` in comments. Treat them as informed sketches; if you
+  have one of those stores, the adapter is where to look first.
+- **Non-Claude sessions are archive-only** — no live tail. See **Harnesses**.
+- The visual encoding is tuned on Claude sessions, and a harness with a smaller
+  tool vocabulary makes a visibly sparser city: a Codex session running two
+  distinct tools raises two monoliths, and the eight-family legend stays mostly
+  unlit. That is the data being honest, not a bug — but it does mean the view
+  flatters harnesses that call many different tools.
 - Tested on Windows 11 with Chrome; the runner and paths are written to be
   cross-platform and macOS-specific fallbacks exist, but Linux is untested.
 - It is a loopback developer tool. The tail server binds 127.0.0.1, gates
