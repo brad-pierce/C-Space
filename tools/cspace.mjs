@@ -17,7 +17,8 @@ import { join, resolve, dirname, normalize, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createTailHandler, listSessions, guard } from './live-server.mjs';
-import { DATA_DIR } from './cspace-paths.mjs';
+import { createSetupHandler, injectSetupBootstrap, isLoopbackBind } from './setup-server.mjs';
+import { DATA_DIR, FLAGSHIP_FILE } from './cspace-paths.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(ROOT, 'dist');
@@ -93,11 +94,28 @@ function sendFrom(req, res, root, pathname, spaFallback) {
     if (real !== base && !real.startsWith(base + sep)) { res.writeHead(403); res.end('forbidden'); return; }
   } catch { res.writeHead(404); res.end('not found'); return; }
 
-  const body = readFileSync(file);
+  let body = readFileSync(file);
+  const ext = extname(file).toLowerCase();
+
+  // SETUP BOOTSTRAP INJECTION. The per-run setup token reaches the page ONLY
+  // here — there is no endpoint that returns it, which is what makes the token
+  // worth having. Injection happens at SERVE time, into the response buffer, so
+  // dist/ on disk never contains it and a `vite build` output can be published
+  // anywhere. Applies to every .html document served out of dist/ (index and
+  // fleet alike — uniformity beats a special case; fleet.html simply ignores the
+  // global). /data/* responses are never injected into.
+  let cache = 'no-cache';
+  if (ext === '.html' && root === DIST) {
+    body = Buffer.from(injectSetupBootstrap(body.toString('utf8'), SETUP_MUTABLE), 'utf8');
+    // no-store, not no-cache: a proxy or bfcache must never hand one run's
+    // token to a later run, where it would be silently unauthenticated.
+    cache = 'no-store';
+  }
+
   res.writeHead(200, {
-    'Content-Type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
+    'Content-Type': MIME[ext] ?? 'application/octet-stream',
     'Content-Length': body.length,
-    'Cache-Control': 'no-cache',
+    'Cache-Control': cache,
   });
   res.end(req.method === 'HEAD' ? undefined : body);
 }
@@ -171,12 +189,23 @@ function openBrowser(url) {
 // ---------- server ----------
 const handleTail = createTailHandler();
 
+// THE SETUP SURFACE IS ARMED ONLY AFTER WE KNOW WHAT WE BOUND TO. Both of these
+// are decided in onListening from the resolved bind, and requests cannot arrive
+// before then — so until that moment the surface declines everything and the
+// injected bootstrap is the honest read-only form.
+let handleSetup = () => false;
+let SETUP_MUTABLE = false;
+
 const server = createServer((req, res) => {
   // Loopback Host/Origin gate on every request (blocks LAN peers that slipped
   // through and DNS-rebinding domains); binding to 127.0.0.1 is the primary
-  // defense, this is belt-and-suspenders and keeps CORS off `*`.
+  // defense, this is belt-and-suspenders and keeps CORS off `*`. It answers 403
+  // on EVERY path, so it advertises nothing about /setup in particular; the
+  // setup handler's own socket-peer check is the part that catches a server
+  // mistakenly bound wide being reached by a peer forging `Host: localhost`.
   if (!guard(req, res)) return;
   const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
+  if (handleSetup(req, res)) return;  // /setup/* (loopback bind only; 404 otherwise)
   if (handleTail(req, res)) return;   // /sessions, /stream
   serveStatic(req, res, url);
 });
@@ -196,12 +225,33 @@ function listen(port, attemptsLeft) {
   };
   const onListening = () => {
     server.off('error', onError);
-    const url = `http://localhost:${port}/`;
+
+    // AUTO-OFF. The setup surface exists only on a loopback bind. `--host
+    // 0.0.0.0` is an explicit decision to expose transcripts to a network, and
+    // a config-write verb has no business existing in that shape — so the
+    // factory hands back a handler that declines everything and /setup/* 404s
+    // like any unknown path, for the local operator too.
+    const bound = server.address()?.address ?? HOST;
+    SETUP_MUTABLE = isLoopbackBind(bound);
+    handleSetup = createSetupHandler({ boundHost: bound, mutable: SETUP_MUTABLE });
+
+    // The demo is the first thing a new operator sees: `npm start` must never
+    // be blank or scolding. ?demo=1 plays the bundled SYNTHETIC session (no
+    // real transcript) until a library exists.
+    const hasFlagship = existsSync(FLAGSHIP_FILE);
+    const url = `http://localhost:${port}/${hasFlagship ? '' : '?demo=1'}`;
+
     let sessionCount = 0;
     try { sessionCount = listSessions().length; } catch { /* ~/.claude absent */ }
     if (port !== BASE_PORT) console.log(`[c-space] port ${BASE_PORT} was busy — port ${port} won`);
-    console.log(`[c-space] serving dist/ + live tail on ${url}`);
+    console.log(`[c-space] serving dist/ + live tail on http://localhost:${port}/`);
     console.log(`[c-space] ${sessionCount} allowlisted session(s) visible via /sessions`);
+    // Says that the surface is armed and how it is fenced. THE TOKEN VALUE IS
+    // NEVER PRINTED — it reaches the page by HTML injection and nothing else,
+    // and this line lands in screen-shares.
+    console.log(SETUP_MUTABLE
+      ? `[c-space] setup surface armed at ${'http://localhost:' + port}/setup — loopback only, per-run token, this process only`
+      : '[c-space] setup surface OFF (non-loopback bind) — configure with: npm run allowlist');
     console.log('[c-space] C-SPACE ONLINE');
     if (!NO_OPEN) openBrowser(url);
   };

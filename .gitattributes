@@ -1,0 +1,26 @@
+# Normalise line endings so a Windows clone and a macOS/Linux clone have the
+# SAME BYTES in the working tree.
+#
+# Why this file exists: git's core.autocrlf=true (the Windows default) rewrites
+# text files to CRLF on checkout. That is invisible to `git diff` — git
+# normalises on the way back in — so the tree looks clean while the bytes on
+# disk differ from every other platform. It silently broke a writer test that
+# asserted on a literal "\n", for a reason that had nothing to do with the code
+# under test. Pinning eol=lf keeps the checkout identical everywhere.
+#
+# The allowlist writer separately preserves whatever endings the OPERATOR's own
+# config arrived with (Notepad writes CRLF); that is a runtime property and is
+# unaffected by this file.
+
+* text=auto eol=lf
+
+# Binary — never touch, never diff as text.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.mp4    binary
+*.webm   binary
+*.woff   binary
+*.woff2  binary
+*.ico    binary

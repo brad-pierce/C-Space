@@ -44,6 +44,12 @@ import { PALETTE as LIB_PALETTE, CSS as LIB_CSS } from '../lib/palette.js';
 // this work, and a named import of an export that is not there yet is a hard
 // link error. Read it off the namespace and degrade to the local banding below.
 import * as PAL from '../lib/palette.js';
+// The hover card's SESSION row paints a working directory. The rule that takes
+// the OS username out of one is src/lib/labels.js and ONLY src/lib/labels.js —
+// the copy that used to live here knew Windows slugs and nothing else, so every
+// macOS and Linux session put the username under the cursor. Never re-implement
+// it here.
+import { projectTag } from '../lib/labels.js';
 
 // ---- tunables ---------------------------------------------------------------
 const MAX_SLOTS = 48;          // mirror machines.js pool cap
@@ -80,16 +86,6 @@ const easeIO = (x) => {
   const c = clamp(x, 0, 1);
   return c < 0.5 ? 4 * c * c * c : 1 - Math.pow(-2 * c + 2, 3) / 2;
 };
-
-// "C--Users-you-myapp" → "MYAPP" (same rule as machines.js)
-function projectLabel(proj) {
-  let s = String(proj ?? '')
-    .replace(/^[A-Za-z]--/, '')
-    .replace(/^Users-[^-]+-?/i, '')
-    .replace(/^-+|-+$/g, '');
-  if (!s) s = 'HOME';
-  return s.toUpperCase().slice(0, 18);
-}
 
 function fmtTok(n) {
   if (!Number.isFinite(n) || n <= 0) return '—';
@@ -265,7 +261,7 @@ function syncRoster(ctx) {
       if (S.order.length >= MAX_SLOTS) continue;
       rec = {
         id, id8: id.slice(0, 8), slot: S.order.length,
-        label: projectLabel(sess.project),
+        label: projectTag(sess.project),
         active: !!sess.active,
         mtime: Number(sess.mtime) || 0,
         sizeMB: Number.isFinite(sess.sizeMB) ? sess.sizeMB : null,

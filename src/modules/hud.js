@@ -10,6 +10,11 @@
 // was perf-audit P1 hud.js:82; opacity does the legibility work instead).
 // Counts and ticker index against ctx.timeline.events (compaction-deduped) so
 // vitals agree with the world: COMPACTIONS reads the deduped total.
+// Ticker text is home-collapsed before it is truncated — event labels are raw
+// tool arguments, so an absolute path would otherwise print the OS username in
+// every screenshot. The rule is src/lib/paths.js dehome(), shared with every
+// other surface that paints raw transcript strings; see that module's header
+// for exactly what is matched.
 // The filter chip is read-only off ctx.state.filterTool (interact.js owns
 // setting/clearing it). The key block (LEGEND r4) sits at the SESSION VITALS
 // size/contrast tier and stacks three keyed sections:
@@ -59,6 +64,18 @@
 // stagger on every attract advance would be exactly the visible "now showing"
 // cue the seamless ruling forbids, so no animation is retriggered by a swap.
 
+// The two privacy rules this module renders through are SHARED, never local:
+//   · src/lib/labels.js  compressProject() — how a project reads on the glass
+//   · src/lib/paths.js   dehome()/learnHome() — home collapse for raw strings
+// Both were once copied into this file. Each copy drifted and each drift put
+// the OS username back on screen (the identity block read '<NAME> // <ID8>'
+// because a local fallback re-appended the segment the regex had just
+// stripped). dehome/learnHome are re-exported below so the sibling surfaces
+// and tests that already reference them keep one implementation between them.
+import { compressProject, UNKNOWN_LABEL } from '../lib/labels.js';
+import { dehome, learnHome } from '../lib/paths.js';
+export { dehome, learnHome };
+
 const SPEEDS = [1, 2, 4];
 const TICKER_LINES = 5;
 const SEEK_JUMP = 50; // fired-event batches bigger than this are seeks, not playback
@@ -71,18 +88,27 @@ const SEEK_JUMP = 50; // fired-event batches bigger than this are seeks, not pla
 const LEGEND_ORDER = ['shell', 'other', 'search', 'agents', 'mutate', 'browser', 'web', 'meta'];
 
 const shortTool = (t) => (!t ? 'TOOL' : t.startsWith('mcp__') ? t.split('__').pop() : t);
-// identity-line project label — "C--Users-you-myapp" or
-// "C:\Users\you\myapp" → "MYAPP". Same compression
-// grammar as library.js rows so the two chromes agree; falls back through
-// (project dir, cwd), then to the path basename when the Users-prefix strip
-// empties the string (home-dir sessions). Uppercase, capped for block width.
+// identity-line project label — "C--Users-you-myapp" / "C:\Users\you\myapp" →
+// "MYAPP". THE RULE IS NOT HERE: compressProject() in src/lib/labels.js is the
+// single implementation, shared with the SETUP tick list and the LIBRARY
+// PROJECT column so all three chromes agree about what a project is called.
+// This wrapper only does the identity block's presentation on top of it —
+// source preference (project dir, then cwd), uppercase, capped for block width.
+//
+// There is deliberately NO basename fallback. The copy that used to live here
+// carried `|| flat.split('-').pop()`, which fired precisely when the home
+// prefix had been stripped to nothing — i.e. on a home-directory session — and
+// painted the OS username as the project name in the block the operator
+// screen-shares. A home directory renders as HOME_LABEL ('~'), the same as it
+// does in the panels; a label that compresses to nothing yields null and the
+// caller prints 'SESSION'. A raw path segment is never a fallback.
 const projectLabel = (proj, cwd) => {
   for (const src of [proj, cwd]) {
     if (!src) continue;
-    const flat = String(src).replace(/[\\/:]+/g, '-').replace(/^-+|-+$/g, '');
-    const label = (flat.replace(/^[A-Za-z]-+Users-+[^-]+-*/i, '') || flat.split('-').pop() || '')
-      .toUpperCase();
-    if (label) return label.length > 20 ? label.slice(0, 19) + '…' : label;
+    const label = compressProject(src);
+    if (!label || label === UNKNOWN_LABEL) continue;
+    const up = label.toUpperCase();
+    return up.length > 20 ? up.slice(0, 19) + '…' : up;
   }
   return null;
 };
@@ -91,6 +117,19 @@ const trunc = (s, n) => {
   s = String(s ?? '').replace(/\s+/g, ' ').trim();
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 };
+// ---- home-directory collapse ----------------------------------------------
+// dehome() and learnHome() are imported from src/lib/paths.js at the top of
+// this file. The rule, the two-pass learned/shape design, the enumerated root
+// tokens and the documented deliberate NON-matches (bare /Users/, bare /home/,
+// and the example.com/users/<name> URL tradeoff) all live in that module's
+// header — this module is one CONSUMER of it, not its owner. The chronogram
+// hover card and the drone labels render the same raw transcript fields and
+// import the same function; a second copy here is what left them unprotected.
+//
+// This module is where the name is LEARNED: _renderIdentity() calls
+// learnHome(meta.cwd, playing.project, playing.cwd) on init and on every
+// session swap, before any surface builds a line, so every other consumer
+// inherits the learned account name without repeating the lookup.
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const pad = (n, w) => String(n).padStart(w, '0');
 // The PLAYING session's context ceiling. ctx.contextCap is per-session (a Codex
@@ -535,26 +574,30 @@ export default {
   },
 
   // ---- per-event ticker line -----------------------------------------------
+  // Every field that came out of the transcript (tool argument, prompt preview,
+  // hook name) goes through dehome() before trunc() — see src/lib/paths.js.
+  // Tool names and the fixed glyph/word prefixes are ours, never paths,
+  // so they are left alone. Widths, glyphs, casing and classes are unchanged.
   _makeLine(e) {
     switch (e.kind) {
       case 'tool_call':
-        return { c: 'k-call', t: `▸ ${shortTool(e.tool)}  ${trunc(e.label, 34)}` };
+        return { c: 'k-call', t: `▸ ${shortTool(e.tool)}  ${trunc(dehome(e.label), 34)}` };
       case 'tool_result':
         return e.err
           ? { c: 'k-err', t: `◂ ERR ${shortTool(e.tool)}  ${kb(e.chars)}` }
           : { c: 'k-res', t: `◂ RESULT ${kb(e.chars)}` };
       case 'spawn':
-        return { c: 'k-spawn', t: `✚ SPAWN ${trunc(e.label, 30)}` };
+        return { c: 'k-spawn', t: `✚ SPAWN ${trunc(dehome(e.label), 30)}` };
       case 'despawn':
-        return { c: 'k-spawn', t: `⊖ RETURN ${trunc(this._spawnLabels.get(e.id) ?? 'subagent', 28)}` };
+        return { c: 'k-spawn', t: `⊖ RETURN ${trunc(dehome(this._spawnLabels.get(e.id)) ?? 'subagent', 28)}` };
       case 'compaction':
         return { c: 'k-comp', t: '⧉ COMPACTION // CONTEXT COLLAPSE' };
       case 'hook':
-        return { c: e.err ? 'k-err' : 'k-hook', t: `◆ HOOK ${trunc(e.name, 30)}` };
+        return { c: e.err ? 'k-err' : 'k-hook', t: `◆ HOOK ${trunc(dehome(e.name), 30)}` };
       case 'user':
-        return { c: 'k-user', t: `» USER  ${trunc(e.preview, 32)}` };
+        return { c: 'k-user', t: `» USER  ${trunc(dehome(e.preview), 32)}` };
       case 'say':
-        return { c: 'k-say', t: `« MODEL ${trunc(e.preview, 32)}` };
+        return { c: 'k-say', t: `« MODEL ${trunc(dehome(e.preview), 32)}` };
       case 'thinking':
         return { c: 'k-think', t: `∴ THINKING ${kb(e.chars)}` };
       default:
@@ -655,6 +698,11 @@ export default {
   _renderIdentity(ctx) {
     const meta = ctx.session?.meta ?? {};
     const playing = ctx.playing;
+    // Teach dehome() this session's account name before a single ticker line is
+    // built (init and reset both reach _makeLine only after this call). meta.cwd
+    // is the absolute path; playing.project is the same directory as Claude's
+    // munged key, and is the only source a live stream may carry.
+    learnHome(meta.cwd, playing?.project, playing?.cwd);
     const id8 = String(playing?.sessionId ?? meta.sessionId ?? '').slice(0, 8);
     const projLabel = projectLabel(playing?.project, meta.cwd) ?? 'SESSION';
     // the dot is a child of line 2, so it must be re-parented after the text

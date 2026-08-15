@@ -12,25 +12,32 @@ import { LIBRARY_DIR } from '../tools/cspace-paths.mjs';
 import { SessionParser, cleanPreview } from '../tools/session-parser.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SESSION_ID = '2a798897-8664-4819-baf0-da5692653f54';
-const FIXTURE_JSON = join(LIBRARY_DIR, `${SESSION_ID}.json`);
-
-// Locate the raw transcript across ~/.claude/projects rather than hardcoding a
-// project directory. The parity test is fixture-backed (both the raw JSONL and
-// its CLI-parsed output are local, gitignored files), so it skips cleanly on a
-// fresh clone that has neither — keeping the suite portable and public-safe.
-function findRawJsonl() {
+// Pair a raw transcript with its CLI-parsed fixture WITHOUT naming a session.
+// This used to hardcode a real local session id — a genuine identifier from the
+// author's machine, committed to a public repo, and usable nowhere else. Now it
+// discovers the first id present in BOTH the library and ~/.claude/projects.
+// The parity test is fixture-backed (both files are local and gitignored), so it
+// still skips cleanly on a fresh clone that has neither.
+function findFixturePair() {
   const base = join(homedir(), '.claude', 'projects');
+  let built, dirs;
   try {
-    for (const d of readdirSync(base)) {
-      const p = join(base, d, `${SESSION_ID}.jsonl`);
-      if (existsSync(p)) return p;
+    built = readdirSync(LIBRARY_DIR)
+      .filter((f) => f.endsWith('.json') && f !== 'index.json')
+      .map((f) => f.slice(0, -'.json'.length));
+    dirs = readdirSync(base);
+  } catch { return { id: null, raw: null }; }
+  for (const id of built) {
+    for (const d of dirs) {
+      const p = join(base, d, `${id}.jsonl`);
+      if (existsSync(p)) return { id, raw: p };
     }
-  } catch { /* no local session store */ }
-  return null;
+  }
+  return { id: null, raw: null };
 }
-const RAW_JSONL = findRawJsonl();
-const haveFixtures = !!RAW_JSONL && existsSync(FIXTURE_JSON);
+const { id: SESSION_ID, raw: RAW_JSONL } = findFixturePair();
+const FIXTURE_JSON = SESSION_ID ? join(LIBRARY_DIR, `${SESSION_ID}.json`) : null;
+const haveFixtures = !!RAW_JSONL && !!FIXTURE_JSON && existsSync(FIXTURE_JSON);
 
 const T0 = '2026-08-11T15:36:19.579Z';
 const tPlus = (s) => new Date(Date.parse(T0) + s * 1000).toISOString();

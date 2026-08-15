@@ -1,12 +1,16 @@
 // library.js — SESSION LIBRARY picker for C-SPACE. Pure DOM/CSS inside #hud.
 // A top-center chip (click, or key L) toggles a panel listing every archived
-// session from /data/library/index.json: the flagship plus library rows with
+// session from /data/library/index.json — ONE ROW PER SESSION, the flagship
+// being a badge on the row it names rather than a row of its own — with
 // vitals — project (compressed), duration, events, tool calls, subagents,
 // compactions, peak context as a thin bar against THAT ROW'S OWN window — and a LIVE
 // row (pulsing dot) that tails a running session. ESC closes; fast fade/slide
 // on toggle. Registers nothing with ctx.pick (DOM only). Owns its own <style>
-// block. Hidden entirely in ?freeze=1 shot mode. No THREE, no canvas, no
-// imports. Node-safe: no DOM access at module scope — everything in init().
+// block. Hidden entirely in ?freeze=1 shot mode. No THREE, no canvas, and the
+// only import is the pure label rule it shares with setup.js (src/lib/labels.js
+// — the PROJECT column is where the OS username would otherwise land on screen,
+// and that rule belongs in exactly one file). Node-safe: no DOM access at module
+// scope — everything in init().
 //
 // ROW ACTIVATION — in place when it can be (see SESSION SWAP CONTRACT in
 // main.js). An archive row calls ctx.swapSession({ session, attract }): no
@@ -21,17 +25,54 @@
 // from URL params: a swap never changes location, so ?session= is stale the
 // moment one happens. reset(ctx) re-derives it and redraws the row list from
 // the cached index — no refetch, no GPU state (this module allocates none).
+//
+// INDEX FRESHNESS — a FAILED read is never cached as an answer. On a first run
+// there is no library at all (/data/library/index.json 404s), and the setup
+// panel can build one a minute later WITHOUT the page ever reloading: it swaps
+// in place (SESSION SWAP CONTRACT). So a read that did not produce a real index
+// — a 404, a timeout, or the tail-roster fallback — is held as PROVISIONAL. It
+// renders, and it is re-read on the next open, and on a session swap while the
+// panel is up (the setup panel's finishing swap is exactly that moment). A read
+// that DID produce an index is cached for the life of the page: the set of
+// archived sessions is not session-shaped, and re-reading it per attract advance
+// would be a poll wearing a different hat.
+//
+// NOTHING RETRIES WHILE THE PANEL IS CLOSED, and this module owns no timer of
+// any kind. This is a wall display that can sit unattended for hours; a
+// background retry loop on a 404 would still be running at 3am for a panel
+// nobody has opened. Every re-read is driven by an event the operator can see —
+// an open, a swap with the panel already up, or an explicit invalidate() — and
+// it stops for good the moment a real index arrives.
+
+import { compressProject } from '../lib/labels.js';
 
 const INDEX_URL = '/data/library/index.json';
 
+// Deadlines, so a socket that accepts and then says nothing cannot wedge the
+// single-read guard into a permanent "a read is already out" state — the exact
+// shape of latch that leaves a panel insisting there is no library forever.
+const FETCH_MS = 6000;
+// Collapses a BURST of automatic re-reads (several swaps in a few seconds) into
+// one. Deliberately short: it exists to stop a stampede, not to ration recovery
+// — a build that finishes ten seconds after a failed read must still be picked
+// up by its own finishing swap. What actually bounds this is the open panel, not
+// this number. An open or an explicit invalidate() is never floored.
+const AUTO_MIN_MS = 3000;
+
+// AbortSignal.timeout is stdlib in every browser this renders in and in Node 22
+// (this file is imported under `node --test`), but it is read at call time and
+// feature-checked so a host without it degrades to an un-deadlined fetch rather
+// than throwing.
+const deadline = (ms) =>
+  (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? { signal: AbortSignal.timeout(ms) }
+    : undefined);
+
 // ---- pure helpers ----------------------------------------------------------
-// "C--Users-you-myapp" or "C:\Users\you\myapp" → "myapp"
-const compressProject = (p) => {
-  if (!p) return '—';
-  let s = String(p).replace(/[\\/:]+/g, '-');
-  s = s.replace(/^-*[A-Za-z]-+Users-+[^-]+-+/i, '');
-  return (s || '—').toLowerCase();
-};
+// compressProject() is imported from src/lib/labels.js at the top of this file,
+// shared with setup.js. It used to be defined here and copied verbatim into
+// setup.js, so the PROJECT column and the setup tick list had the same hole in
+// the same rule twice over.
 
 const fmtDur = (min) => {
   if (min == null || !isFinite(min)) return '—';
@@ -192,6 +233,12 @@ export default {
  display:flex;align-items:center;}
 .libx-row:hover .libx-lab,.libx-row.cur .libx-lab{color:${C.coreHot};text-shadow:0 0 7px ${C.cache}55;}
 .libx-head .libx-lab{color:inherit;text-shadow:none;}
+/* label text truncates; the tag beside it never does */
+.libx-labtxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.libx-tag{flex:none;margin-left:.7em;padding:0 4px;font-size:7px;letter-spacing:.18em;
+ color:${C.hudDim};text-shadow:none;box-shadow:inset 0 0 0 1px ${C.hudDim}55;}
+.libx-row:hover .libx-tag,.libx-row.cur .libx-tag{color:${C.cache};
+ box-shadow:inset 0 0 0 1px ${C.cache}66;text-shadow:none;}
 .libx-proj{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .libx-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
 
@@ -335,7 +382,13 @@ export default {
       const row = div('libx-row' + (r.head ? ' libx-head' : '') + (r.cur ? ' cur' : ''), rowsHost);
       const lab = div('libx-lab', row);
       if (r.dot) div('libx-dot', lab);
-      el('span', null, lab, r.label);
+      el('span', 'libx-labtxt', lab, r.label);
+      // A row can carry one badge (today: FLAGSHIP). It is a marker on the row,
+      // not a row of its own — see the fold in renderRows.
+      if (r.tag) {
+        const t = el('span', 'libx-tag', lab, r.tag);
+        if (r.tagTitle) t.title = r.tagTitle;
+      }
       div('libx-proj', row, r.project ?? '—');
       div('libx-num', row, r.dur ?? '—');
       div('libx-num', row, r.evt ?? '—');
@@ -417,16 +470,52 @@ export default {
         if (!(idx.sessions ?? []).length) div('libx-msg', rowsHost, 'NO SESSIONS ON TAIL');
         return;
       }
-      // FLAGSHIP — the default session, no ?session param
+      // FLAGSHIP — the default session, the one that loads with no ?session
+      // param. It is not a SEPARATE session: build-library promotes the richest
+      // archived session into the flagship slot, so the flagship id is normally
+      // ALSO an idx.sessions entry. Drawn as its own row it therefore repeated a
+      // session that is already in the list — and on a first run, when the
+      // library holds exactly that one session, the panel showed the same id
+      // twice on adjacent rows with identical stats, told apart only by the .cur
+      // stripe. That is what every new user saw.
+      //
+      // So FOLD instead of duplicating: when the flagship matches a session in
+      // the list, that row carries the FLAGSHIP badge and activates the default
+      // (no-param) route, keeping the default discoverable and the list honest —
+      // one row per session. Position is unchanged in practice, since the
+      // flagship is the top-of-list session the old flagship row sat above.
+      //
+      // A flagship that matches NOTHING in the list — a hand-written index, an
+      // id-less flagship, a sessions array that lost it — still gets its own row
+      // exactly as before, because that row is the only way to reach the default.
       const fl = idx.flagship ?? {};
-      addRow({
-        ...sessionRow({ ...flagshipStats(), ...fl }, !curLive && curId == null),
-        onClick: () => activate(null),
-      });
-      for (const s of idx.sessions ?? []) {
-        addRow(sessionRow(s, !curLive && s.id != null && s.id === curId));
+      const sessions = idx.sessions ?? [];
+      const flId = fl.id ?? null;
+      const folded = flId != null && sessions.some((s) => s.id === flId);
+      const TAG = 'FLAGSHIP';
+      const TAG_TITLE = 'FLAGSHIP — the default session, loaded with no ?session param';
+      // The default route and ?session=<flagship id> put the SAME session on
+      // screen, so both light the single row that now represents it.
+      const flCur = !curLive && (curId == null || (flId != null && curId === flId));
+      if (!folded) {
+        addRow({
+          ...sessionRow({ ...flagshipStats(), ...fl }, !curLive && curId == null),
+          tag: TAG, tagTitle: TAG_TITLE,
+          onClick: () => activate(null),
+        });
       }
-      if (!(idx.sessions ?? []).length) div('libx-msg', rowsHost, 'NO ARCHIVED SESSIONS');
+      for (const s of sessions) {
+        if (folded && s.id === flId) {
+          addRow({
+            ...sessionRow({ ...flagshipStats(), ...s }, flCur),
+            tag: TAG, tagTitle: TAG_TITLE,
+            onClick: () => activate(null),   // the default route, as the flagship row had
+          });
+        } else {
+          addRow(sessionRow(s, !curLive && s.id != null && s.id === curId));
+        }
+      }
+      if (!sessions.length) div('libx-msg', rowsHost, 'NO ARCHIVED SESSIONS');
     };
 
     // Fresh-clone fallback source: the tail roster. Same discovery order as
@@ -436,7 +525,10 @@ export default {
     const discoverRoster = async () => {
       for (const base of ['', 'http://localhost:5198']) {
         try {
-          const r = await fetch(base + '/sessions');
+          // Deadlined: the dev-tail probe is a cross-port guess, and a host that
+          // accepts the connection and never answers must not hold the read open
+          // (and with it the single-read guard) for the life of the page.
+          const r = await fetch(base + '/sessions', deadline(FETCH_MS));
           if (!r.ok) continue;
           const roster = await r.json();
           if (Array.isArray(roster) && roster.length) return roster;
@@ -445,43 +537,105 @@ export default {
       return null;
     };
 
-    // ---- index fetch (lazy, cached; errors allow retry on next open) --------
-    // The resolved payload is kept in this._idx (undefined = never fetched, so
+    // ---- index read (lazy; a FAILED read is never cached as the answer) ------
+    // The resolved payload is kept in this._idx (undefined = never read, so
     // reset has nothing to redraw and the first open renders it correctly
     // anyway) purely so a swap can re-render the highlight off cached data.
-    let idxPromise = null;
-    const ensureIndex = () => {
-      if (idxPromise) return;
-      rowsHost.textContent = '';
-      div('libx-msg', rowsHost, 'ACCESSING LIBRARY…');
-      idxPromise = fetch(INDEX_URL)
+    // `idxFresh` is what makes that cache authoritative: only a read that
+    // actually produced an index sets it. See INDEX FRESHNESS in the header.
+    let isOpen = false;         // declared here so the read path can consult it
+    let idxPromise = null;      // a read is out; null the moment it settles
+    let idxFresh = false;       // the cached payload IS the library index
+    let lastTry = 0;            // when the last read started (automatic floor)
+
+    const readIndex = () => {
+      lastTry = Date.now();
+      // Hold whatever real rows are already up while a re-read is out; only a
+      // panel with nothing to show (never read, or the unreachable message)
+      // gets the placeholder, so a re-read never throws away good rows and the
+      // layout does not jump.
+      if (this._idx == null) {
+        rowsHost.textContent = '';
+        div('libx-msg', rowsHost, 'ACCESSING LIBRARY…');
+      }
+      idxPromise = fetch(INDEX_URL, deadline(FETCH_MS))
         .then((r) => {
           if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
         })
-        .then((idx) => { this._idx = idx; renderRows(idx); })
+        .then((idx) => {
+          // A 200 carrying null or a scalar is not an index. Treating it as one
+          // would latch the very state this guard exists to prevent — cached,
+          // "fresh", and rendering the unreachable message forever.
+          if (!idx || typeof idx !== 'object') throw new Error('malformed index');
+          idxFresh = true;
+          this._idx = idx;
+          renderRows(idx);
+        })
         .catch(async (err) => {
-          // No parsed index (fresh clone has an empty store). Fall back
-          // to the tail roster so the library still lists real sessions.
-          console.info('[c-space] library index unavailable:', err.message, '— trying tail roster');
+          // No parsed index (fresh clone has an empty store, or the library has
+          // not been built yet). Fall back to the tail roster so the library
+          // still lists real sessions — provisionally: idxFresh stays false, so
+          // the next open re-reads and picks up a library built in the meantime.
+          // Code/message only, never a label or a path (F6).
+          console.info('[c-space] library index unavailable:', err?.message ?? 'error', '— trying tail roster');
           const roster = await discoverRoster();
-          idxPromise = null; // retry on next open
+          idxFresh = false;
           this._idx = roster ? { fromTail: true, sessions: roster } : null;
           renderRows(this._idx);
-        });
+        })
+        // Both arms, always: the guard is released even if a handler throws, so
+        // a failed read can never leave the module believing a read is still in
+        // flight and refusing every later one.
+        .finally(() => { idxPromise = null; });
     };
+
+    // `auto` = nobody asked for this (a session swap). Those collapse when they
+    // arrive in a burst; an open or an explicit invalidate() never does.
+    const ensureIndex = (auto) => {
+      if (idxPromise) return;                                    // one read at a time
+      if (idxFresh) return;                                      // already have the real thing
+      if (auto && Date.now() - lastTry < AUTO_MIN_MS) return;    // collapse a burst
+      readIndex();
+    };
+
+    // EXPLICIT INVALIDATION — for anything that makes a library appear WITHOUT a
+    // session swap. The setup panel's build ends in a swap (contract §6.2), which
+    // reset() below already covers; this is the handle for the cases that do not,
+    // and it is deliberately cheap: drop the cache, re-read only if the panel is
+    // actually up, never start a timer. Safe to call at any time, from anywhere.
+    const invalidate = () => {
+      idxFresh = false;
+      lastTry = 0;                    // an explicit call is not an automatic retry
+      if (isOpen) ensureIndex(false);
+    };
+    this._invalidate = invalidate;
+    // Named integration/verification handle, the same idiom main.js uses for
+    // window.__CSPACE_SWAP. No listener, no timer, nothing to dispose.
+    try { window.__CSPACE_LIBRARY = { invalidate }; } catch { /* non-browser host */ }
 
     // reset() has no DOM locals of its own; it drives the same build step init
     // does. Held on the module so a swap can call it without re-running init.
-    this._redraw = () => { if (this._idx !== undefined) renderRows(this._idx); };
+    this._redraw = () => {
+      if (this._idx !== undefined) renderRows(this._idx);
+      // A swap is the one moment where "there is no library" can have just
+      // stopped being true — the setup panel finishes a build by swapping in
+      // place, with this panel possibly open beside it still showing the
+      // pre-build failure. Re-read instead of repainting a stale answer — only
+      // while the panel is up, so an attract reel running to an empty auditorium
+      // with the panel closed never touches the network.
+      if (isOpen) ensureIndex(true);
+    };
 
     // ---- open/close ---------------------------------------------------------
-    let isOpen = false;
     const setOpen = (v) => {
       isOpen = v;
       panel.classList.toggle('open', v);
       chip.classList.toggle('on', v);
-      if (v) ensureIndex();
+      // An open re-reads whenever the last read did not produce an index — this
+      // is the path that recovers a panel left saying UNREACHABLE from before a
+      // build, with no page reload.
+      if (v) ensureIndex(false);
     };
     const toggle = () => setOpen(!isOpen);
 
@@ -510,8 +664,11 @@ export default {
   // The row nodes ARE replaced (rowsHost.textContent = '' drops them with their
   // own click listeners attached, so no listener outlives its node), and only
   // when the panel has been opened at least once — an attract run that never
-  // opens the library does no DOM work per advance. The cached index payload is
-  // reused rather than refetched: the library of sessions is not session-shaped.
+  // opens the library does no DOM work per advance. A GOOD cached index payload
+  // is reused rather than refetched: the library of sessions is not
+  // session-shaped. A payload that is NOT the index (a 404, a timeout, the tail
+  // roster) is re-read here instead — but only with the panel open, which is what
+  // keeps this a recovery and not a poll. See INDEX FRESHNESS in the header.
   // No timers, no per-frame work, no allocation either way.
   // (no ctx parameter needed: init's closures read the stable ctx object at call
   // time — a swap rebinds ctx.session/timeline/playing, never ctx itself.)

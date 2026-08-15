@@ -119,24 +119,31 @@ test('registry: discoverAll() rows are source-tagged, well-formed, and newest-fi
 // ===========================================================================
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CLAUDE_SESSION_ID = '2a798897-8664-4819-baf0-da5692653f54';
-const CLAUDE_FIXTURE = join(LIBRARY_DIR, `${CLAUDE_SESSION_ID}.json`);
-
-// Locate the raw transcript across ~/.claude/projects (same trick as
-// parser.test.mjs) rather than hardcoding a project dir. Skips cleanly when the
-// local session store or the library fixture is absent.
-function findClaudeRawJsonl() {
+// Pair a raw transcript with its built library fixture WITHOUT naming a session.
+// This used to hardcode a real local session id, which baked a genuine session
+// identifier into a public repo and only ever worked on one machine. Instead,
+// take the first id that exists in BOTH the library and ~/.claude/projects — a
+// namespaced id from another harness simply never finds a .jsonl and is skipped.
+function findClaudePair() {
   const base = join(homedir(), '.claude', 'projects');
+  let built, dirs;
   try {
-    for (const d of readdirSync(base)) {
-      const p = join(base, d, `${CLAUDE_SESSION_ID}.jsonl`);
-      if (existsSync(p)) return p;
+    built = readdirSync(LIBRARY_DIR)
+      .filter((f) => f.endsWith('.json') && f !== 'index.json')
+      .map((f) => f.slice(0, -'.json'.length));
+    dirs = readdirSync(base);
+  } catch { return { id: null, raw: null }; }   // no store, or nothing built yet
+  for (const id of built) {
+    for (const d of dirs) {
+      const p = join(base, d, `${id}.jsonl`);
+      if (existsSync(p)) return { id, raw: p };
     }
-  } catch { /* no local session store */ }
-  return null;
+  }
+  return { id: null, raw: null };
 }
-const CLAUDE_RAW = findClaudeRawJsonl();
-const haveClaudeFixture = !!CLAUDE_RAW && existsSync(CLAUDE_FIXTURE);
+const { id: CLAUDE_SESSION_ID, raw: CLAUDE_RAW } = findClaudePair();
+const CLAUDE_FIXTURE = CLAUDE_SESSION_ID ? join(LIBRARY_DIR, `${CLAUDE_SESSION_ID}.json`) : null;
+const haveClaudeFixture = !!CLAUDE_RAW && !!CLAUDE_FIXTURE && existsSync(CLAUDE_FIXTURE);
 
 test('CLAUDE: parse() of a known session matches the direct CLI/SessionParser fixture',
   { skip: haveClaudeFixture ? false : 'local Claude session fixture not present' }, () => {

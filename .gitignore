@@ -9,3 +9,5 @@ shots/
 cspace.allowlist.json
 # scratch files from verification agents
 .tmp-*
+# local editor/agent launch config
+.claude/

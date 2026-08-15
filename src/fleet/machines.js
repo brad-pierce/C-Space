@@ -47,6 +47,12 @@ import * as THREE from 'three';
 // this work, and a named import of an export that is not there yet is a hard
 // link error. Read it off the namespace and degrade to the local banding below.
 import * as PAL from '../lib/palette.js';
+// The nameplate paints a working directory. The rule that takes the OS username
+// out of one is src/lib/labels.js and ONLY src/lib/labels.js — this module used
+// to carry its own copy, which knew Windows slugs and nothing else, so every
+// macOS ("/Users/you/app") and Linux ("/home/you/app") session put the username
+// on a totem you can read from across the room. Never re-implement it here.
+import { projectTag } from '../lib/labels.js';
 
 // ---- tunables ---------------------------------------------------------------
 const MAX_MACHINES = 48;      // pool cap (server roster caps at 40)
@@ -167,16 +173,6 @@ function patchInstancedEmissive(mat) {
       '#include <emissivemap_fragment>\n#ifdef USE_INSTANCING_COLOR\n\ttotalEmissiveRadiance *= vColor;\n#endif'
     );
   };
-}
-
-// "C--Users-you-myapp" → "MYAPP"
-function projectLabel(proj) {
-  let s = String(proj ?? '')
-    .replace(/^[A-Za-z]--/, '')
-    .replace(/^Users-[^-]+-?/i, '')
-    .replace(/^-+|-+$/g, '');
-  if (!s) s = 'HOME';
-  return s.toUpperCase().slice(0, 18);
 }
 
 // ---- contract adapters (fleetMain's exact ctx shape was unpublished) --------
@@ -522,7 +518,7 @@ function applyState(m) {
 function addMachine(sess, i, nowMs) {
   const m = {
     id: String(sess.id), id8: String(sess.id).slice(0, 8),
-    label: projectLabel(sess.project),
+    label: projectTag(sess.project),
     state: stateFor(sess, nowMs), mtime: Number(sess.mtime) || 0, slot: i,
     x: 0, y: 0, z: 0, phase: S.rng() * Math.PI * 2,
     h: 0, flare: 0, tickF: 0, fill: 0, snapped: false,

@@ -78,6 +78,10 @@
 // PURPOSE list on reset() for the full disposal ledger.
 
 import * as THREE from 'three';
+// The ONE home-directory collapse, shared with the HUD ticker rather than
+// re-derived here. Every string this module paints that came out of a
+// transcript goes through it — see the PRIVACY note on the hover cards below.
+import { dehome } from '../lib/paths.js';
 
 const TAU = Math.PI * 2;
 
@@ -1059,6 +1063,17 @@ export default {
     // object left the scene). The cards read the module-level `lane` / `subs` /
     // `matchesFilter` bindings, which buildSession() re-points at the new
     // session, and seek() goes through ctx.timeline — never a captured local.
+    //
+    // PRIVACY. Every value below that came out of a transcript — a tool name, a
+    // subagent type, a label, a preview, an event name — is painted into a card
+    // the operator hovers on a wall display and on a screen-share, so it goes
+    // through the SHARED dehome() from lib/paths.js, the same helper (not a
+    // second copy of the rule) the HUD ticker runs on the same fields. These
+    // exact strings were observed on screen as 'DETAIL  C:\Users\<name>\…'.
+    // Collapse runs BEFORE trim(), matching the ticker: the characters the
+    // username frees buy back path tail inside the same width budget rather
+    // than shortening the row. dehome() returns a non-path string — and any
+    // non-string — untouched, so no card wording or layout changes.
     const subCard = (vt, r) => {
       let best = null, bestD = Infinity;
       for (const s of subs) {                       // covering arc, nearest ring
@@ -1075,11 +1090,11 @@ export default {
       }
       if (!best) return null;
       return {
-        title: (best.type || 'SUBAGENT').toUpperCase(),
+        title: dehome(best.type || 'SUBAGENT').toUpperCase(),
         lines: [
           ['TIME', fmtTime(best.spawnVt)],
-          ['TOOL', best.type || 'Agent'],
-          ['DETAIL', trim(best.label)],
+          ['TOOL', dehome(best.type || 'Agent')],
+          ['DETAIL', trim(dehome(best.label))],
           ['LIFE', fmtLife(Math.max(0, best.endT - best.spawnT))],
         ],
       };
@@ -1089,11 +1104,11 @@ export default {
       if (i < 0 || Math.abs(ln.vts[i] - vt) > win) return null;
       const e = ln.ev[i];
       const lines = [['TIME', fmtTime(ln.vts[i])]];
-      if (e.tool) lines.push(['TOOL', e.tool]);
-      lines.push(['DETAIL', trim(e.label ?? e.preview ?? e.name ??
-        (Number.isFinite(e.chars) ? `${e.chars} CHARS` : '—'))]);
+      if (e.tool) lines.push(['TOOL', dehome(e.tool)]);
+      lines.push(['DETAIL', trim(dehome(e.label ?? e.preview ?? e.name ??
+        (Number.isFinite(e.chars) ? `${e.chars} CHARS` : '—')))]);
       if (e.err) lines.push(['ERR', 'TRUE']);
-      return { title: (e.tool || e.kind).toUpperCase(), lines };
+      return { title: dehome(e.tool || e.kind).toUpperCase(), lines };
     };
     const cardForHit = (hit) => {
       const p = hit && hit.point;

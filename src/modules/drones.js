@@ -55,6 +55,10 @@
 // disposes nothing and leaks nothing — see the note on reset() below.
 
 import * as THREE from 'three';
+// The ONE home-directory collapse, shared with the HUD ticker rather than
+// re-derived here. The drone hover card paints a subagent's task label, which
+// is transcript text and routinely a path — see the note on claim().
+import { dehome } from '../lib/paths.js';
 
 const POOL = 16;                 // live render capacity (measured visible peak = 14)
 const SEG = 26;                  // tether curve segments per drone
@@ -459,6 +463,16 @@ function claim(p, sub, vt) {
 
   // per-drone pick registration — kind 'drone', debugKey = subagent id.
   // Card resolves STATUS live off S.nowVt so it flips WORKING→DONE in place.
+  //
+  // PRIVACY. TASK and TYPE are transcript text: a subagent's task label is
+  // whatever the parent wrote when it spawned the agent, which is routinely a
+  // file path under the operator's home directory. This card is hovered on a
+  // wall display and on a screen-share, so both go through the SHARED dehome()
+  // from lib/paths.js — the same helper the HUD ticker and the chronogram
+  // cards use, not a fourth copy of the rule. No label in the current session
+  // set happens to hold a path, which is exactly why this one was latent and
+  // is worth fixing at the helper rather than at the sighting. dehome() leaves
+  // a non-path string (and any non-string) alone: no wording, no layout change.
   const ref = sub.ref;
   const span = fmtVt(ref.spawnVt) + '–' + fmtVt(ref.endVt);
   S.pick.register(S.proxies[p], {
@@ -467,8 +481,8 @@ function claim(p, sub, vt) {
     card: () => ({
       title: 'SUBAGENT',
       lines: [
-        ['TASK', ref.label],
-        ['TYPE', ref.type],
+        ['TASK', dehome(ref.label)],
+        ['TYPE', dehome(ref.type)],
         ['SPAN', span],
         ['STATUS', S.nowVt < ref.endVt ? 'WORKING' : 'DONE'],
       ],

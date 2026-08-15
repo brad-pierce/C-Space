@@ -148,7 +148,7 @@ function normalizeAllowlist(j) {
   return sawAny ? cfg : null;
 }
 
-function loadAllowlist() {
+function loadAllowlist({ quiet = false } = {}) {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
   // CSPACE_ALLOWLIST, when set, is AUTHORITATIVE — it is not merely a first
   // candidate. Pointing it at a missing or malformed file must mean "expose
@@ -163,17 +163,41 @@ function loadAllowlist() {
       const cfg = normalizeAllowlist(JSON.parse(readFileSync(p, 'utf8')));
       if (cfg) return cfg;
     } catch (e) {
-      console.warn('[cspace] allowlist parse error at ' + p + ': ' + e.message);
+      // `quiet` has to silence THIS line too, not just the guidance block below.
+      // It is the reload path (reloadAllowlist, on a request), and the line is
+      // the worst one in the file to print there: it carries the absolute config
+      // path AND JSON.parse's message, which quotes the offending region of the
+      // file — i.e. project slugs. F6 is counts only, and reloadAllowlist is
+      // specified to log nothing at all.
+      if (!quiet) console.warn('[cspace] allowlist parse error at ' + p + ': ' + e.message);
     }
   }
+  if (quiet) return { claude: [], sources: Object.create(null) };
   // Missing config is the #1 first-run stumble, so say exactly what to do.
   // Deliberately print the COUNT, never the slugs: project directory names are
   // themselves sensitive (they are cwd paths — client names, internal codenames)
   // and this line lands in a terminal that gets screen-shared and pasted into
   // issues. `npm run allowlist` prints the list locally, where it belongs.
+  // Count what the operator can ACTUALLY opt in, not every directory: the raw
+  // readdir includes dirs holding zero transcripts, which neither `npm run
+  // allowlist` nor the setup panel will ever offer. Printing the bigger number
+  // here and a smaller one there is how an operator learns to distrust both.
+  // Count what the operator can ACTUALLY opt in, not every directory: a raw
+  // readdir also counts dirs holding zero transcripts, which neither `npm run
+  // allowlist` nor the setup panel will ever offer. Printing the bigger number
+  // here and a smaller one there is how an operator learns to distrust both.
+  // setup-discovery.mjs owns this rule (scanClaudeStore/countTranscripts); it
+  // is mirrored rather than imported because loadAllowlist() is synchronous and
+  // runs at module scope. Keep the two in step.
   let found = 0;
   try {
-    found = readdirSync(PROJECTS).filter((d) => !d.includes('--claude-worktrees')).length;
+    found = readdirSync(PROJECTS)
+      .filter((d) => !d.includes('--claude-worktrees'))
+      .filter((d) => {
+        try { return readdirSync(join(PROJECTS, d)).some((f) => f.endsWith('.jsonl')); }
+        catch { return false; }
+      })
+      .length;
   } catch { /* no project store */ }
   console.warn(
     '[cspace] NO ALLOWLIST — cspace.allowlist.json not found, so NO sessions are exposed.\n' +
@@ -183,13 +207,27 @@ function loadAllowlist() {
     '         Fix:  npm run allowlist     (lists them and scaffolds the config)');
   return { claude: [], sources: Object.create(null) };
 }
-const ALLOWLIST = loadAllowlist();
-const ALLOWED_PROJECTS = ALLOWLIST.claude;
+// LIVE BINDING, not a const. The setup surface can rewrite cspace.allowlist.json
+// while the server is running, and every visibility decision below reads through
+// this name — so a mutation takes effect on the next request instead of at the
+// next restart. Nothing may capture `ALLOWLIST.claude` into a module-scope copy:
+// that copy would keep serving the pre-mutation config forever.
+let ALLOWLIST = loadAllowlist();
 const projectAllowed = (proj) =>
-  ALLOWED_PROJECTS.some(a => proj === a || proj.startsWith(a + '--claude-worktrees'));
+  ALLOWLIST.claude.some(a => proj === a || proj.startsWith(a + '--claude-worktrees'));
+
+/** Re-read the resolved allowlist path after a write. Returns COUNTS ONLY and
+ *  logs nothing: this runs on a request path, and a project label in a log line
+ *  is exactly what the whole allowlist exists to keep out of screen-shares. */
+export function reloadAllowlist() {
+  ALLOWLIST = loadAllowlist({ quiet: true });
+  sourceCache = { at: 0, rows: [] };     // the 30s non-Claude cache is now stale
+  coverageReported = true;               // never re-print the coverage lines (they name counts per store)
+  return { claude: ALLOWLIST.claude.length, sources: Object.keys(ALLOWLIST.sources).length };
+}
 
 /** Has this source been explicitly opted into? Claude is always in play (its
- *  own gate is ALLOWED_PROJECTS); every other source must appear in "sources". */
+ *  own gate is the "allow" list); every other source must appear in "sources". */
 export function sourceOptedIn(id) {
   return id === 'claude' || Object.prototype.hasOwnProperty.call(ALLOWLIST.sources, id);
 }

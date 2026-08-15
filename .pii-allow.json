@@ -1,0 +1,51 @@
+{
+  "_comment": "Accepted findings for `npm run pii`. Everything here is a DELIBERATE decision, not a silenced alarm — each entry says who decided and why. Re-open any of them by deleting the line. The scanner derives its sensitive terms from the local machine at runtime and holds them in memory; this file is the only place an accepted identifier is written down, so keep it short and keep the reasons.",
+
+  "_comment_terms": "Terms the scanner would otherwise flag as local machine identifiers.",
+  "terms": [
+    "Gateway",
+    "the-dreaming",
+    "Brad",
+    "brad-pierce"
+  ],
+
+  "_comment_terms_why": [
+    "Gateway — OpenClaw product terminology ('a Gateway host may run many agents') in tools/adapters/openclaw.mjs. Fires only because a local project directory happens to share the word. Confirmed false positive by reading the context.",
+    "the-dreaming — a real local project label, published in v0.2.0 (cspace.allowlist.example.json, tools/live-server.mjs) and repeated in v0.3.0 docs and tests. Owner reviewed and ACCEPTED on 2026-08-15: it is a project name with no transcript content attached and it is already public. Retiring it would require rewriting published history.",
+    "Brad / brad-pierce — the owner's own public identity: the MIT copyright line and the GitHub handle. Explicitly accepted; the scanner flags 'Brad' only because the OS username is his first name."
+  ],
+
+  "_comment_patterns": "Regex sources tested against the MATCHED SPAN. Used here only for INVENTED fixtures — a scanner that tests a username rule has to contain fake usernames, and a scanner that tests a private-IP rule has to contain fake IPs. Each pattern names the exact invented values rather than disabling its rule, so a REAL username, IP, MAC or address in any of those files is still caught. Deliberately not using \"files\" for these: tests/pii-scan.test.mjs has a self-check that scans itself and fails if the file was skipped, which is what stops this from quietly becoming a blanket exemption.",
+  "patterns": [
+    "[Uu]sers[\\\\/](?:ada|grace|mac|zaphod|pat-lee|someoneelse)$",
+    "home[\\\\/](?:ops|pat-lee|x|zaphod)$",
+    "@(?:[A-Za-z0-9-]+\\.)*example$",
+    "^(?:10\\.0\\.0\\.7|172\\.20\\.3\\.9|192\\.168\\.1\\.44)$",
+    "^3C:22:FB:1A:9D:04$",
+    "^api_key = \"k7Qm2Xr9Tb4Wz1Pn6Vd8Lc3Hj5Sy0Ae\"$"
+  ],
+
+  "_comment_patterns_why": [
+    "The invented usernames (ada, grace, mac, zaphod, pat-lee, someoneelse, ops, x) are fixtures for dehome()/compressProject() in tests/dehome.test.mjs, tests/labels.test.mjs and the doc comments in src/lib/paths.js. Zaphod and Zarquon are Hitchhiker's names, chosen so they cannot collide with a real person on this machine.",
+    "The .example TLD is RFC 2606 reserved and can never be a real address.",
+    "The three IPs and the MAC are fixtures in tests/pii-scan.test.mjs proving those rules fire. Pinned to the exact values so any OTHER private IP or MAC is still reported."
+  ],
+
+  "_comment_files": "Paths whose findings are accepted wholesale. Keep this list as short as possible: allow-listing a FILE is much blunter than allow-listing a term, and it hides future leaks in that file too. tests/pii-scan.test.mjs is deliberately NOT here — it has a self-check that asserts its own fixtures are invented rather than real, and listing it made the scanner skip the file, turning that check into a vacuous pass.",
+  "files": [
+    "LICENSE"
+  ],
+
+  "_comment_files_why": [
+    "LICENSE — the MIT copyright holder line."
+  ],
+
+  "_comment_reviewed": "Binaries a human has ACTUALLY OPENED and cleared. A text scan cannot read pixels, so these do not pass automatically — listing one here is a claim that someone looked. Do not add a file you have not viewed.",
+  "reviewed": [
+    "docs/img/cspace-wide.jpeg",
+    "docs/img/cspace-chronogram.jpeg",
+    "docs/video/cspace-demo.mp4"
+  ],
+
+  "_comment_reviewed_why": "All three reviewed 2026-08-15 by frame sampling. The 35s demo video was sampled at 1 fps across its full runtime: the identity block reads DEMO-PROJECT // DEMO0000 throughout and the library panel that opens mid-reel lists only invented projects (DEMO-PROJECT, API-GATEWAY, INGEST-WORKER, SCHEMA-MIGRATE, DOCS-SITE). Re-review after any re-record."
+}

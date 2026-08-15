@@ -26,7 +26,7 @@
 //   }
 // ctx = { THREE, scene, camera, renderer, session, timeline, PALETTE, CSS, LAYOUT,
 //         TOOL_COLORS, toolFamily, CHRONO, CONTEXT_TOKEN_CAP, contextCap,
-//         params, quality,
+//         params, quality, setupProbe,
 //         playing — { mode: 'live'|'archive'|'attract', base, sessionId, project }
 //                   what is on screen and where it streams from (hud reads it;
 //                   attract.js is active only when mode === 'attract'),
@@ -165,6 +165,17 @@
 //                    entries no longer goes through this URL — it is an in-place
 //                    ctx.swapSession (see SESSION SWAP CONTRACT above). This
 //                    shape survives as a deep link: "start attract HERE".
+//   ?demo=1        — the bundled synthetic session, as a DELIBERATE STATE. It is
+//                    resolved BEFORE live-first discovery (so it costs no roster
+//                    timeouts and is not overruled by a running session), and it
+//                    is what the runner opens on a machine with nothing built
+//                    yet. Only explicit ?live= outranks it. mode 'attract'
+//                    ('archive' under ?freeze=1). The bundled demo ALSO remains
+//                    the last rung of the archive fallback chain below — that
+//                    chain is unchanged; this is an additional front door.
+//   ?setup=1       — force-open the setup panel (src/modules/setup.js). Has no
+//                    effect on which session boots, and none at all when the
+//                    setup surface does not exist.
 //   (none of the above) — live-first boot: fleet.html at 2+ active sessions,
 //                    live at exactly 1; otherwise the ARCHIVE FALLBACK plays
 //                    the flagship with mode 'attract' — the machine dreams
@@ -188,15 +199,37 @@ import interact from './modules/interact.js';
 import post from './modules/post.js';
 import hud from './modules/hud.js';
 import library from './modules/library.js';
+import setup from './modules/setup.js';
 import audio from './modules/audio.js';
 import zoomRail from './modules/zoomRail.js';
 import attract from './modules/attract.js';
 
-// attract registers last: its identity normalization needs hud's DOM at init
-const MODULES = [environment, chronogram, core, contextStack, totems, drones, cameraRig, interact, post, hud, library, audio, zoomRail, attract];
+// attract registers last: its identity normalization needs hud's DOM at init.
+// setup sits next to library: both are DOM-only console panels whose chips
+// share the #chips row, and setup's chip reads as a sibling of LIBRARY there.
+const MODULES = [environment, chronogram, core, contextStack, totems, drones, cameraRig, interact, post, hud, library, setup, audio, zoomRail, attract];
 
 const params = new URLSearchParams(location.search);
 const SHOT_MODE = params.get('freeze') === '1';
+
+// SETUP STATE PROBE — asked here, at module scope, so the round-trip overlaps
+// bootTimeline()'s roster discovery and session fetch instead of queueing behind
+// them. FIRST PAINT NEVER WAITS ON THIS: nothing awaits SETUP_PROBE before the
+// renderer exists; src/modules/setup.js picks the promise up off ctx during its
+// (synchronous) init and mounts its chip if and when the answer arrives.
+// Resolution shape, deliberately three-way:
+//   { status: 200, state }  the setup surface exists — offer the panel
+//   { status: 404, state: null }  it does not exist here (no runner, or a bind
+//                                 that is not loopback) — offer nothing at all,
+//                                 no chip and no key binding. Never a 403: the
+//                                 surface is not supposed to advertise itself.
+//   { status: 0,   state: null }  the request never landed — the module retries
+//                                 once rather than treating a hiccup as a 404.
+// Shot mode asks nothing: ?freeze=1 has no setup chrome by construction, and a
+// deterministic still should make no request it does not need.
+const SETUP_PROBE = SHOT_MODE ? null : fetch('/setup/state', { headers: { Accept: 'application/json' } })
+  .then(async (r) => ({ status: r.status, state: r.ok ? await r.json().catch(() => null) : null }))
+  .catch(() => ({ status: 0, state: null }));
 
 // Session ids from the URL flow straight into fetch() paths and location
 // navigation. Constrain them to the id shape (uuid-like: alnum, dash,
@@ -325,6 +358,33 @@ async function bootTimeline() {
     }
   }
 
+  // ?demo=1 — THE DEMO IS A DELIBERATE STATE, not the tail of a fallback chain.
+  // The runner opens `/?demo=1` on a machine with no flagship built yet (setup
+  // contract §6.1), and the setup panel's whole premise is that the bundled
+  // synthetic city is already playing behind it. So this branch is checked
+  // BEFORE live-first discovery: it must not spend up to two roster timeouts
+  // deciding whether to show the demo, and on a machine that DOES have active
+  // sessions it must still show the demo rather than being routed to the fleet.
+  // (Explicit ?live= still outranks it — that is a direct instruction to stream.)
+  // It is also the only session safe to screenshot or screen-share, since
+  // nothing in it came from a real transcript, which is what makes the README
+  // stills and any demo recording reproducible by anyone with the repo.
+  if (params.get('demo') === '1') {
+    try {
+      const res = await fetch('/demo/session.json');
+      if (!res.ok) throw new Error(`demo HTTP ${res.status}`);
+      const session = await res.json();
+      return { session, timeline: new Timeline(session), playing: {
+        mode: SHOT_MODE ? 'archive' : 'attract', base: null,
+        sessionId: null, project: session.meta?.cwd ?? 'demo',
+      } };
+    } catch (err) {
+      // Fall through to the ordinary chain below — a missing bundled demo is a
+      // build problem, not a reason to show a black screen.
+      console.warn('[c-space] ?demo=1 requested but the bundled demo is unavailable:', err.message);
+    }
+  }
+
   // LIVE-FIRST BOOT (no explicit mode param — no ?session/?live/?freeze):
   // discover the tail, read the roster, and route — fleet when 2+ sessions are
   // active, live when exactly one is, archive attract otherwise.
@@ -352,24 +412,6 @@ async function bootTimeline() {
     } else {
       attract = true;
       console.info(`[c-space] live-first: ${tail ? 'no active sessions' : 'tail unreachable'} — archive fallback, attract mode`);
-    }
-  }
-
-  // ?demo=1 — play the bundled synthetic session explicitly, even on a machine
-  // that has its own data. It is the only session safe to screenshot or screen-
-  // share (nothing in it came from a real transcript), so the README stills and
-  // any demo recording are reproducible by anyone with the repo.
-  if (params.get('demo') === '1') {
-    try {
-      const res = await fetch('/demo/session.json');
-      if (!res.ok) throw new Error(`demo HTTP ${res.status}`);
-      const session = await res.json();
-      return { session, timeline: new Timeline(session), playing: {
-        mode: SHOT_MODE ? 'archive' : 'attract', base: null,
-        sessionId: null, project: session.meta?.cwd ?? 'demo',
-      } };
-    } catch (err) {
-      console.warn('[c-space] ?demo=1 requested but the bundled demo is unavailable:', err.message);
     }
   }
 
@@ -483,6 +525,10 @@ async function boot() {
     contextCap: contextCapFor(initial.session),
     PALETTE, CSS, LAYOUT, CONTEXT_TOKEN_CAP, TOOL_COLORS, toolFamily, CHRONO,
     params, quality: params.get('q') ?? 'high',
+    // Promise for GET /setup/state, already in flight (see SETUP_PROBE above).
+    // Only src/modules/setup.js consumes it, and only to decide whether the
+    // setup surface exists at all; it re-reads state itself from then on.
+    setupProbe: SETUP_PROBE,
     composerRender: null,
     setComposer(fn) { ctx.composerRender = fn; },
     pick: {

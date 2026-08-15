@@ -10,14 +10,33 @@
 // may hold client or otherwise sensitive sessions). Re-running never overwrites
 // an existing config; it reports what is allowed, what is available, and what
 // is configured but missing.
+//
+// EVERY WRITE GOES THROUGH tools/allowlist-store.mjs — the same bounded,
+// atomic, comment-preserving writer the in-app setup panel uses. This file owns
+// discovery and console output; it owns no file-writing logic of its own. Two
+// consequences, both deliberate:
+//   · the config path is the RESOLVED one (CSPACE_ALLOWLIST when set, exactly as
+//     the server resolves it), so `npm run allowlist` can no longer curate a
+//     file the server is not reading;
+//   · your comments, key order and hand edits survive a --allow run.
 
-import { readdirSync, statSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readdirSync, statSync, existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+
+import { readAllowlist, applyAllowlistOps, resolveAllowlistPath } from './allowlist-store.mjs';
 
 const PROJECTS = join(homedir(), '.claude', 'projects');
-const CONFIG = join(dirname(fileURLToPath(import.meta.url)), '..', 'cspace.allowlist.json');
+const CONFIG = resolveAllowlistPath();
+
+// Home-collapse for display only — the absolute path leaks the OS username, and
+// this line gets pasted into issues.
+const shown = (p) => {
+  const abs = resolve(p);
+  const home = resolve(homedir());
+  return abs.startsWith(home) ? '~' + abs.slice(home.length) : abs;
+};
+const REDIRECTED = !!process.env.CSPACE_ALLOWLIST?.trim();
 
 // Flags so nobody has to hand-edit JSON:
 //   --allow <slug> [<slug>…]   allow exactly these (repeatable, also comma-separated)
@@ -67,15 +86,18 @@ if (!discovered.length) {
 
 const slugs = discovered.map((d) => d.slug);
 
+if (REDIRECTED) console.log(`[allowlist] CSPACE_ALLOWLIST is set — using ${shown(CONFIG)}\n`);
+
+// A config that exists but does not parse is never overwritten — that would
+// destroy a curation nobody can read back. Say so and stop, on every path.
+const current = readAllowlist();
+if (current.exists && !current.valid) {
+  console.error(`[allowlist] existing ${shown(CONFIG)} is not valid JSON: ${current.parseError}`);
+  process.exit(1);
+}
+
 // ---- flag-driven writes (merge into any existing config) --------------------
 if (ALLOW_ALL || ALLOW_EXPLICIT.length || ALLOW_MATCH.length) {
-  let existing = [];
-  if (existsSync(CONFIG)) {
-    try {
-      const j = JSON.parse(readFileSync(CONFIG, 'utf8'));
-      existing = (Array.isArray(j) ? j : j.allow) ?? [];
-    } catch { /* unreadable — start fresh below */ }
-  }
   let add = [];
   if (ALLOW_ALL) add = slugs.slice();
   for (const s of ALLOW_EXPLICIT) {
@@ -87,13 +109,18 @@ if (ALLOW_ALL || ALLOW_EXPLICIT.length || ALLOW_MATCH.length) {
     if (hits.length) add.push(...hits);
     else console.warn(`[allowlist] --allow-match "${m}" matched nothing — skipped`);
   }
-  const allow = [...new Set([...existing, ...add])];
-  writeFileSync(CONFIG, JSON.stringify({
-    _comment: 'C-Space project allowlist (local, gitignored). Only projects in "allow" are exposed. ' +
-      'An allow entry also covers that project\'s --claude-worktrees children.',
-    allow,
-    discovered: slugs,
-  }, null, 2) + '\n');
+
+  try {
+    await applyAllowlistOps(
+      [...new Set(add)].map((project) => ({ verb: 'allow', source: 'claude', project })),
+      { discovered: slugs },
+    );
+  } catch (e) {
+    console.error(`[allowlist] could not write ${shown(CONFIG)}: ${e.code ?? ''} ${e.message}`.trim());
+    process.exit(1);
+  }
+
+  const allow = readAllowlist().entries.allow;
   console.log(`[allowlist] allow now has ${allow.length} project(s):`);
   for (const a of allow) {
     const d = discovered.find((x) => x.slug === a);
@@ -107,15 +134,8 @@ if (ALLOW_ALL || ALLOW_EXPLICIT.length || ALLOW_MATCH.length) {
   process.exit(0);
 }
 
-if (existsSync(CONFIG)) {
-  let allow = [];
-  try {
-    const j = JSON.parse(readFileSync(CONFIG, 'utf8'));
-    allow = (Array.isArray(j) ? j : j.allow) ?? [];
-  } catch (e) {
-    console.error(`[allowlist] existing ${CONFIG} is not valid JSON: ${e.message}`);
-    process.exit(1);
-  }
+if (current.exists) {
+  const allow = current.entries.allow;
   console.log(`[allowlist] cspace.allowlist.json exists — not overwriting.\n`);
   console.log('  ALLOWED (visible in C-Space):');
   const active = allow.filter((a) => slugs.includes(a));
@@ -131,13 +151,16 @@ if (existsSync(CONFIG)) {
   process.exit(0);
 }
 
-writeFileSync(CONFIG, JSON.stringify({
-  _comment: 'C-Space project allowlist (local, gitignored). Move slugs from "discovered" into "allow" ' +
-    'to expose those projects. Nothing in "discovered" is visible until you allow it — keep sensitive ' +
-    'or client work out. An allow entry also covers that project\'s --claude-worktrees children.',
-  allow: [],
-  discovered: slugs,
-}, null, 2) + '\n');
+// ---- no config yet: scaffold a DEFAULT-DENY one -----------------------------
+// Nothing is allowed. The store creates the commented template and records what
+// this machine has under "discovered"; moving a slug into "allow" is a
+// deliberate, separate act.
+try {
+  await applyAllowlistOps([], { discovered: slugs });
+} catch (e) {
+  console.error(`[allowlist] could not write ${shown(CONFIG)}: ${e.code ?? ''} ${e.message}`.trim());
+  process.exit(1);
+}
 
 console.log(`[allowlist] wrote cspace.allowlist.json with ${slugs.length} discovered projects:\n`);
 for (const d of discovered) console.log(`    ${d.slug}  (${d.sessions} sessions)`);

@@ -38,6 +38,11 @@ import { PALETTE as LIB_PALETTE, CSS as LIB_CSS } from '../lib/palette.js';
 // this work, and a named import of an export that is not there yet is a hard
 // link error. Read it off the namespace and degrade to the local banding below.
 import * as PAL from '../lib/palette.js';
+// The PROJECT column paints a working directory. The rule that takes the OS
+// username out of one is src/lib/labels.js and ONLY src/lib/labels.js — the copy
+// that used to live here knew Windows slugs and nothing else, so every macOS and
+// Linux session printed the username in the roster. Never re-implement it here.
+import { projectTag } from '../lib/labels.js';
 
 // ---- tunables ---------------------------------------------------------------
 const MAX_ROWS = 40;          // server roster caps at 40
@@ -69,16 +74,6 @@ function tailLabel(ctx) {
   if (base === '') return 'TAIL ' + String(location.host).toUpperCase();
   if (typeof base === 'string') return 'TAIL ' + base.replace(/^https?:\/\//i, '').toUpperCase();
   return 'TAIL LOCALHOST:5198';
-}
-
-// "C--Users-you-myapp" → "MYAPP" (same rule as machines.js)
-function projectLabel(proj) {
-  let s = String(proj ?? '')
-    .replace(/^[A-Za-z]--/, '')
-    .replace(/^Users-[^-]+-?/i, '')
-    .replace(/^-+|-+$/g, '');
-  if (!s) s = 'HOME';
-  return s.toUpperCase().slice(0, LABEL_MAX);
 }
 
 function fmtTok(n) {
@@ -456,7 +451,7 @@ export default {
       let r = this._rows.get(id);
       if (!r) {
         r = {
-          id, label: projectLabel(sess.project),
+          id, label: projectTag(sess.project, LABEL_MAX),
           active: false, sizeMB: sess.sizeMB ?? null,
           // harness identity + this row's own context ceiling (source arrives
           // with the multi-harness discovery wiring; null means "not stated")
